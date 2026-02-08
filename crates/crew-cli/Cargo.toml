@@ -1,0 +1,32 @@
+[package]
+name = "crew-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI interface for dora-crew"
+
+[[bin]]
+name = "crew"
+path = "src/main.rs"
+
+[dependencies]
+crew-core = { workspace = true }
+crew-agent = { workspace = true }
+crew-memory = { workspace = true }
+crew-llm = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+colored = { workspace = true }
+tokio = { workspace = true }
+eyre = { workspace = true }
+color-eyre = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

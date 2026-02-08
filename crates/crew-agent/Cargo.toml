@@ -1,0 +1,30 @@
+[package]
+name = "crew-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Agent runtime, tool execution, and coordination for dora-crew"
+
+[dependencies]
+crew-core = { workspace = true }
+crew-memory = { workspace = true }
+crew-llm = { workspace = true }
+# codex-execpolicy = { workspace = true }  # Enable when codex builds
+# codex-file-search = { workspace = true }
+# codex-linux-sandbox = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+eyre = { workspace = true }
+tracing = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+ignore = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
