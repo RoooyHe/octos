@@ -1,22 +1,30 @@
 # crew-rs
 
-Rust-native coding agent orchestration framework. Build fast, modular AI coding agents with multi-provider LLM support.
+Rust-native AI agent framework with multi-channel gateway, 12+ LLM providers, and coding automation tools.
 
 ## Features
 
-- **Multi-provider LLM support**: Anthropic (Claude), OpenAI (GPT-4), Google Gemini
-- **Task coordination**: Coordinator/worker pattern for complex tasks
+- **12+ LLM providers**: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, Groq, Moonshot, DashScope, MiniMax, Zhipu, Ollama, vLLM
+- **Multi-channel gateway**: CLI, Telegram, Discord, Slack, WhatsApp, Feishu/Lark
+- **Interactive chat**: Multi-turn conversation with readline history
+- **Task execution**: Run coding tasks with coordinator/worker pattern
 - **Resumable tasks**: Interrupt with Ctrl+C and resume later
-- **Episodic memory**: Agents learn from past task completions
-- **Built-in tools**: Shell, file read/write/edit, glob, grep
-- **Retry with backoff**: Automatic retry on transient API errors
-- **Token budgeting**: Limit total tokens per task
+- **Memory system**: Episodic memory, daily notes, long-term memory, bootstrap files
+- **Skills system**: Markdown-based skills with YAML frontmatter
+- **Cron & heartbeat**: Scheduled tasks and periodic background checks
+- **Subagent spawning**: Background agents for long-running tasks
+- **Cross-channel messaging**: Send messages across any connected channel
+- **Provider auto-detect**: Automatically selects provider from model name
+- **Built-in tools**: Shell, file ops, glob, grep, web search/fetch, message, spawn, cron
 
 ## Installation
 
 ```bash
 # From source
 cargo install --path crates/crew-cli
+
+# With channel support
+cargo install --path crates/crew-cli --features telegram,discord,slack
 
 # Or build locally
 cargo build --release
@@ -26,116 +34,95 @@ cargo build --release
 ## Quick Start
 
 ```bash
-# Initialize configuration
+# Initialize configuration and workspace
 crew init
 
 # Set your API key
 export ANTHROPIC_API_KEY=your-key-here
 
-# Run a task
+# Interactive chat
+crew chat
+
+# Run a one-shot task
 crew run "Add a hello function to lib.rs"
+
+# Check system status
+crew status
 ```
 
 ## Commands
 
+### `crew chat`
+
+Interactive multi-turn conversation:
+
+```bash
+crew chat                          # Default provider
+crew chat --provider openai        # Use OpenAI
+crew chat --model gpt-4o           # Auto-detects OpenAI
+crew chat --verbose                # Show tool outputs
+```
+
+### `crew run <goal>`
+
+Execute a coding task:
+
+```bash
+crew run "Fix the bug in auth.rs"
+crew run "Refactor the API" --provider deepseek --verbose
+crew run "Add authentication" --coordinate    # Coordinator mode
+crew run "Quick fix" --max-iterations 10 --max-tokens 50000
+```
+
+### `crew gateway`
+
+Run as a persistent multi-channel messaging daemon:
+
+```bash
+crew gateway                       # Uses config from .crew/config.json
+crew gateway --provider openai     # Override provider
+crew gateway --verbose             # Verbose logging
+```
+
 ### `crew init`
 
-Initialize `.crew/config.json` in your project:
+Initialize workspace with config and bootstrap files:
 
 ```bash
 crew init              # Interactive setup
 crew init --defaults   # Use defaults (Anthropic/Claude)
 ```
 
-### `crew run <goal>`
+Creates:
+- `.crew/config.json` - Configuration
+- `.crew/AGENTS.md` - Agent instructions
+- `.crew/SOUL.md` - Personality definition
+- `.crew/USER.md` - User preferences
+- `.crew/memory/`, `.crew/sessions/`, `.crew/skills/` directories
 
-Execute a task with an AI agent:
+### `crew status [task-id]`
+
+Show system or task status:
 
 ```bash
-# Basic usage
-crew run "Fix the bug in auth.rs"
-
-# With options
-crew run "Refactor the API" \
-  --provider openai \
-  --model gpt-4o \
-  --max-iterations 100 \
-  --max-tokens 50000 \
-  --verbose
-
-# Run as coordinator (decomposes into subtasks)
-crew run "Add user authentication" --coordinate
+crew status              # System status (config, API keys, bootstrap files)
+crew status abc123       # Task details
 ```
 
-**Options:**
-- `--provider`: LLM provider (`anthropic`, `openai`, `gemini`)
-- `--model`: Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`)
-- `--max-iterations`: Maximum agent loop iterations (default: 50)
-- `--max-tokens`: Token budget limit (input + output)
-- `--verbose`: Show tool outputs
-- `--no-retry`: Disable automatic retry on errors
-- `--coordinate`: Run as coordinator with subtask delegation
-
-### `crew resume [task-id]`
-
-Resume an interrupted task:
+### Other Commands
 
 ```bash
-crew resume              # List resumable tasks
-crew resume abc123       # Resume specific task
-```
-
-### `crew list`
-
-List all resumable tasks:
-
-```bash
-crew list
-```
-
-### `crew status <task-id>`
-
-Show details of a specific task:
-
-```bash
-crew status abc123
-```
-
-### `crew clean`
-
-Clean up task state files:
-
-```bash
-crew clean              # Remove completed task files
-crew clean --all        # Remove all task data including databases
-crew clean --dry-run    # Show what would be deleted
-```
-
-### `crew completions <shell>`
-
-Generate shell completions:
-
-```bash
-# Bash
-crew completions bash > ~/.local/share/bash-completion/completions/crew
-
-# Zsh
-crew completions zsh > ~/.zfunc/_crew
-
-# Fish
-crew completions fish > ~/.config/fish/completions/crew.fish
-
-# PowerShell
-crew completions powershell >> $PROFILE
+crew resume [task-id]    # Resume interrupted task
+crew list                # List resumable tasks
+crew clean [--all]       # Clean up state files
+crew completions <shell> # Generate shell completions
 ```
 
 ## Configuration
 
-Configuration is loaded from (in order):
-1. `.crew/config.json` in current directory
-2. `~/.config/crew/config.json` (global)
+Config is loaded from `.crew/config.json` (project) or `~/.config/crew/config.json` (global).
 
-### Example config
+### Basic config
 
 ```json
 {
@@ -145,68 +132,92 @@ Configuration is loaded from (in order):
 }
 ```
 
-### Environment variable expansion
-
-Config values support `${VAR_NAME}` syntax:
+### Gateway config
 
 ```json
 {
-  "base_url": "${ANTHROPIC_BASE_URL}"
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "gateway": {
+    "channels": [
+      {"type": "cli"},
+      {"type": "telegram", "allowed_senders": ["123456"]},
+      {"type": "slack", "settings": {"bot_token_env": "SLACK_BOT_TOKEN", "app_token_env": "SLACK_APP_TOKEN"}}
+    ],
+    "max_history": 50,
+    "system_prompt": "You are a helpful assistant."
+  }
 }
 ```
 
-### Supported providers
+### Supported Providers
 
 | Provider | API Key Env | Default Model |
 |----------|-------------|---------------|
 | anthropic | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 |
 | openai | `OPENAI_API_KEY` | gpt-4o |
 | gemini | `GEMINI_API_KEY` | gemini-2.0-flash |
+| openrouter | `OPENROUTER_API_KEY` | anthropic/claude-sonnet-4-20250514 |
+| deepseek | `DEEPSEEK_API_KEY` | deepseek-chat |
+| groq | `GROQ_API_KEY` | llama-3.3-70b-versatile |
+| moonshot | `MOONSHOT_API_KEY` | kimi-k2.5 |
+| dashscope | `DASHSCOPE_API_KEY` | qwen-max |
+| minimax | `MINIMAX_API_KEY` | MiniMax-Text-01 |
+| zhipu | `ZHIPU_API_KEY` | glm-4-plus |
+| ollama | (none) | llama3.2 |
+| vllm | `VLLM_API_KEY` | (requires --model) |
+
+Provider is auto-detected from model name when not specified (e.g., `--model gpt-4o` selects OpenAI).
 
 ## Architecture
 
 ```
 crew-rs/
   crates/
-    crew-core/      # Types, task model, protocols
-    crew-memory/    # Episodic memory store
-    crew-llm/       # LLM provider abstraction
-    crew-agent/     # Agent runtime, tools, coordination
-    crew-cli/       # CLI interface
+    crew-core/      # Types, task model, message protocols
+    crew-memory/    # Episodic memory, task store, memory store
+    crew-llm/       # LLM provider abstraction (4 providers)
+    crew-agent/     # Agent runtime, tools, skills, coordination
+    crew-bus/       # Message bus, channels, sessions, cron, heartbeat
+    crew-cli/       # CLI interface (chat, run, gateway, init, status)
 ```
-
-### Agent Roles
-
-- **Worker**: Executes tasks directly using tools
-- **Coordinator**: Decomposes complex goals into subtasks, delegates to workers
 
 ### Built-in Tools
 
 | Tool | Description |
 |------|-------------|
-| `shell` | Execute shell commands |
+| `shell` | Execute shell commands (SafePolicy) |
 | `read_file` | Read file contents |
 | `write_file` | Write/create files |
 | `edit_file` | Edit files with search/replace |
 | `glob` | Find files by pattern |
-| `grep` | Search file contents |
-| `delegate_task` | (Coordinator) Assign subtask to worker |
-| `delegate_batch` | (Coordinator) Assign multiple subtasks in parallel |
+| `grep` | Search file contents (regex) |
+| `web_search` | Internet search |
+| `web_fetch` | Fetch and parse web content |
+| `message` | Send cross-channel messages |
+| `spawn` | Launch background subagents |
+| `cron` | Schedule recurring tasks |
+| `delegate_task` | (Coordinator) Delegate subtask |
+| `delegate_batch` | (Coordinator) Parallel delegation |
+
+### Gateway Channels
+
+| Channel | Feature Flag | Transport |
+|---------|-------------|-----------|
+| CLI | (built-in) | stdin/stdout |
+| Telegram | `telegram` | teloxide (long poll) |
+| Discord | `discord` | serenity (gateway) |
+| Slack | `slack` | WebSocket (Socket Mode) |
+| WhatsApp | `whatsapp` | WebSocket (Node.js bridge) |
+| Feishu/Lark | `feishu` | WebSocket + REST |
 
 ## Development
 
 ```bash
-# Build
-cargo build --workspace
-
-# Test
-cargo test --workspace
-
-# Lint
-cargo clippy --workspace
-
-# Format
-cargo fmt --all
+cargo build --workspace           # Build
+cargo test --workspace            # Test (130+ tests)
+cargo clippy --workspace          # Lint
+cargo fmt --all                   # Format
 ```
 
 ## License
