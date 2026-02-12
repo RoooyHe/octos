@@ -9,7 +9,7 @@ use clap::Args;
 use colored::Colorize;
 use crew_agent::{Agent, AgentConfig, MessageTool, SilentReporter, SkillsLoader, SpawnTool, ToolRegistry};
 use crew_bus::{ChannelManager, CliChannel, CronService, HeartbeatService, SessionManager, create_bus};
-use crew_core::{AgentId, AgentRole, Message, MessageRole, OutboundMessage};
+use crew_core::{AgentId, Message, MessageRole, OutboundMessage};
 use crew_llm::{
     LlmProvider, RetryProvider, anthropic::AnthropicProvider, gemini::GeminiProvider,
     openai::OpenAIProvider, openrouter::OpenRouterProvider,
@@ -320,7 +320,6 @@ impl GatewayCommand {
 
         let agent = Agent::new(
             AgentId::new("gateway"),
-            AgentRole::Worker,
             llm,
             tools,
             memory,

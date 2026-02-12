@@ -22,9 +22,7 @@ fn test_help_command() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("crew-rs"));
     assert!(stdout.contains("init"));
-    assert!(stdout.contains("run"));
-    assert!(stdout.contains("resume"));
-    assert!(stdout.contains("list"));
+    assert!(stdout.contains("chat"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("clean"));
     assert!(stdout.contains("completions"));
@@ -56,9 +54,9 @@ fn test_init_help() {
 }
 
 #[test]
-fn test_run_help() {
+fn test_chat_help() {
     let output = Command::new(crew_binary())
-        .args(["run", "--help"])
+        .args(["chat", "--help"])
         .output()
         .expect("Failed to execute command");
 
@@ -66,25 +64,8 @@ fn test_run_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--provider"));
     assert!(stdout.contains("--model"));
-    assert!(stdout.contains("--max-iterations"));
-    assert!(stdout.contains("--max-tokens"));
+    assert!(stdout.contains("--message"));
     assert!(stdout.contains("--verbose"));
-    assert!(stdout.contains("--no-retry"));
-    assert!(stdout.contains("--coordinate"));
-}
-
-#[test]
-fn test_resume_help() {
-    let output = Command::new(crew_binary())
-        .args(["resume", "--help"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Resume"));
-    assert!(stdout.contains("--max-iterations"));
-    assert!(stdout.contains("--max-tokens"));
 }
 
 #[test]
@@ -206,15 +187,14 @@ fn test_clean_empty_crew_dir() {
 }
 
 #[test]
-fn test_clean_dry_run() {
+fn test_clean_dry_run_with_all() {
     let temp_dir = tempfile::tempdir().unwrap();
     let crew_dir = temp_dir.path().join(".crew");
-    let tasks_dir = crew_dir.join("tasks");
-    std::fs::create_dir_all(&tasks_dir).unwrap();
-    std::fs::write(tasks_dir.join("task1.json"), "{}").unwrap();
+    std::fs::create_dir_all(&crew_dir).unwrap();
+    std::fs::write(crew_dir.join("episodes.redb"), "fake-db").unwrap();
 
     let output = Command::new(crew_binary())
-        .args(["clean", "--dry-run", "--cwd"])
+        .args(["clean", "--all", "--dry-run", "--cwd"])
         .arg(temp_dir.path())
         .output()
         .expect("Failed to execute command");
@@ -222,24 +202,21 @@ fn test_clean_dry_run() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Would remove"));
-    assert!(stdout.contains("task1.json"));
     assert!(stdout.contains("Dry run"));
 
     // File should still exist
-    assert!(tasks_dir.join("task1.json").exists());
+    assert!(crew_dir.join("episodes.redb").exists());
 }
 
 #[test]
-fn test_clean_removes_files() {
+fn test_clean_all_removes_redb() {
     let temp_dir = tempfile::tempdir().unwrap();
     let crew_dir = temp_dir.path().join(".crew");
-    let tasks_dir = crew_dir.join("tasks");
-    std::fs::create_dir_all(&tasks_dir).unwrap();
-    std::fs::write(tasks_dir.join("task1.json"), "{}").unwrap();
-    std::fs::write(tasks_dir.join("task2.json"), "{}").unwrap();
+    std::fs::create_dir_all(&crew_dir).unwrap();
+    std::fs::write(crew_dir.join("episodes.redb"), "fake-db").unwrap();
 
     let output = Command::new(crew_binary())
-        .args(["clean", "--cwd"])
+        .args(["clean", "--all", "--cwd"])
         .arg(temp_dir.path())
         .output()
         .expect("Failed to execute command");
@@ -248,34 +225,6 @@ fn test_clean_removes_files() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Cleaned"));
 
-    // Files should be deleted
-    assert!(!tasks_dir.join("task1.json").exists());
-    assert!(!tasks_dir.join("task2.json").exists());
-}
-
-#[test]
-fn test_list_no_tasks() {
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    let output = Command::new(crew_binary())
-        .args(["list", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    // Should succeed even with no tasks
-    assert!(output.status.success());
-}
-
-#[test]
-fn test_run_missing_goal() {
-    let output = Command::new(crew_binary())
-        .arg("run")
-        .output()
-        .expect("Failed to execute command");
-
-    // Should fail with missing required argument
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("required"));
+    // Database file should be deleted
+    assert!(!crew_dir.join("episodes.redb").exists());
 }

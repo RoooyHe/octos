@@ -18,7 +18,7 @@ pub struct ToolResult {
     pub success: bool,
     /// File modified by this tool (if any).
     pub file_modified: Option<PathBuf>,
-    /// Tokens used by this tool (for delegate_task).
+    /// Tokens used by this tool (for subagent tools).
     pub tokens_used: Option<TokenUsage>,
 }
 
@@ -90,22 +90,18 @@ impl ToolRegistry {
 }
 
 // Built-in tools
-pub mod delegate;
-pub mod delegate_batch;
 pub mod edit_file;
 pub mod glob_tool;
 pub mod grep_tool;
 pub mod list_dir;
+pub mod message;
 pub mod read_file;
 pub mod shell;
-pub mod message;
 pub mod spawn;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
-pub use delegate::DelegateTaskTool;
-pub use delegate_batch::DelegateBatchTool;
 pub use edit_file::EditFileTool;
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
@@ -119,9 +115,6 @@ pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
 
 use std::path::Path;
-
-use crew_llm::LlmProvider;
-use crew_memory::EpisodeStore;
 
 impl ToolRegistry {
     /// Create a registry with built-in tools for the given working directory.
@@ -137,23 +130,6 @@ impl ToolRegistry {
         registry.register(ListDirTool::new(cwd));
         registry.register(WebSearchTool::new());
         registry.register(WebFetchTool::new());
-        registry
-    }
-
-    /// Create a registry with coordinator tools (builtins + delegate + batch).
-    pub fn with_coordinator_tools(
-        cwd: impl AsRef<Path>,
-        llm: Arc<dyn LlmProvider>,
-        memory: Arc<EpisodeStore>,
-    ) -> Self {
-        let cwd = cwd.as_ref();
-        let mut registry = Self::with_builtins(cwd);
-        registry.register(DelegateTaskTool::new(
-            llm.clone(),
-            memory.clone(),
-            cwd.to_path_buf(),
-        ));
-        registry.register(DelegateBatchTool::new(llm, memory, cwd.to_path_buf()));
         registry
     }
 }

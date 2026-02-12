@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Args;
 use colored::Colorize;
 use crew_agent::{Agent, AgentConfig, ConsoleReporter, ToolRegistry};
-use crew_core::{AgentId, AgentRole, Message, MessageRole};
+use crew_core::{AgentId, Message, MessageRole};
 use crew_llm::{
     LlmProvider, RetryProvider, anthropic::AnthropicProvider, gemini::GeminiProvider,
     openai::OpenAIProvider, openrouter::OpenRouterProvider,
@@ -53,6 +53,10 @@ pub struct ChatCommand {
     /// Disable automatic retry on transient errors.
     #[arg(long)]
     pub no_retry: bool,
+
+    /// Send a single message and exit (non-interactive mode).
+    #[arg(short, long)]
+    pub message: Option<String>,
 }
 
 /// Exit commands.
@@ -131,7 +135,6 @@ impl ChatCommand {
         };
         let agent = Agent::new(
             AgentId::new("chat"),
-            AgentRole::Worker,
             llm,
             tools,
             memory,
@@ -139,6 +142,13 @@ impl ChatCommand {
         .with_config(agent_config)
         .with_reporter(reporter)
         .with_shutdown(shutdown.clone());
+
+        // Single-message mode: send one message and exit
+        if let Some(msg) = self.message {
+            let response = agent.process_message(&msg, &[]).await?;
+            println!("{}", response.content);
+            return Ok(());
+        }
 
         // Set up readline
         let history_dir = data_dir.join("history");

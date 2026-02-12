@@ -10,18 +10,16 @@
 6. [Working with Providers](#working-with-providers)
 7. [Gateway Mode](#gateway-mode)
 8. [Memory & Skills](#memory--skills)
-9. [Task Management](#task-management)
-10. [Advanced Usage](#advanced-usage)
+9. [Advanced Usage](#advanced-usage)
 11. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Introduction
 
-crew-rs is a Rust-native AI agent framework that operates in three modes:
+crew-rs is a Rust-native AI agent framework that operates in two modes:
 
-- **Chat mode** (`crew chat`): Interactive multi-turn conversation with tools
-- **Task mode** (`crew run`): One-shot coding task execution with progress tracking
+- **Chat mode** (`crew chat`): Interactive multi-turn conversation with tools (or single-message via `--message`)
 - **Gateway mode** (`crew gateway`): Persistent daemon serving multiple messaging channels
 
 ### Key Concepts
@@ -90,8 +88,8 @@ crew status
 # 3. Start chatting
 crew chat
 
-# 4. Or run a one-shot task
-crew run "Add a hello function to lib.rs"
+# 4. Or send a single message
+crew chat --message "Add a hello function to lib.rs"
 ```
 
 ---
@@ -163,6 +161,7 @@ Options:
       --provider <NAME>    LLM provider
       --model <NAME>       Model name
       --base-url <URL>     Custom API endpoint
+  -m, --message <MSG>      Single message (non-interactive)
       --max-iterations <N> Max tool iterations per message (default: 20)
   -v, --verbose            Show tool outputs
       --no-retry           Disable retry
@@ -175,37 +174,10 @@ Features:
 - Full tool access (shell, files, search, web)
 
 ```bash
-crew chat                          # Default
-crew chat --provider deepseek      # Use DeepSeek
-crew chat --model glm-4-plus       # Auto-detects Zhipu
-```
-
----
-
-### `crew run <goal>`
-
-Execute a one-shot coding task.
-
-```bash
-crew run [OPTIONS] <GOAL>
-
-Options:
-  -c, --cwd <PATH>         Working directory
-      --config <PATH>      Config file path
-      --provider <NAME>    LLM provider
-      --model <NAME>       Model name
-      --base-url <URL>     Custom API endpoint
-      --coordinate         Run as coordinator (decompose + delegate)
-      --max-iterations <N> Max iterations (default: 50)
-      --max-tokens <N>     Token budget
-  -v, --verbose            Show tool outputs
-      --no-retry           Disable retry
-```
-
-```bash
-crew run "Fix the bug in auth.rs"
-crew run --coordinate "Build REST API for users"
-crew run --model gpt-4o --max-tokens 50000 "Refactor database module"
+crew chat                              # Interactive (default)
+crew chat --provider deepseek          # Use DeepSeek
+crew chat --model glm-4-plus           # Auto-detects Zhipu
+crew chat --message "Fix auth bug"     # Single message, exit
 ```
 
 ---
@@ -255,18 +227,17 @@ Creates:
 
 ---
 
-### `crew status [task-id]`
+### `crew status`
 
-Show system status or task details.
+Show system status.
 
 ```bash
-crew status [OPTIONS] [TASK_ID]
+crew status [OPTIONS]
 
 Options:
   -c, --cwd <PATH>    Working directory
 ```
 
-**System status** (no args):
 ```
 crew-rs Status
 ══════════════════════════════════════════════════
@@ -280,7 +251,6 @@ API Keys
 ──────────────────────────────────────────────────
   Anthropic    ANTHROPIC_API_KEY         set
   OpenAI       OPENAI_API_KEY           not set
-  Gemini       GEMINI_API_KEY           not set
   ...
 
 Bootstrap Files
@@ -292,16 +262,12 @@ Bootstrap Files
   IDENTITY.md      missing
 ```
 
-**Task status** (with ID): shows task details, progress, token usage, conversation preview.
-
 ---
 
 ### Other Commands
 
 ```bash
-crew resume [task-id]          # Resume interrupted task
-crew list                      # List resumable tasks
-crew clean [--all] [--dry-run] # Clean state files
+crew clean [--all] [--dry-run] # Clean database files
 crew completions <shell>       # Generate completions (bash/zsh/fish/powershell)
 crew cron list [--all]         # List cron jobs
 crew cron add [OPTIONS]        # Add a cron job
@@ -528,18 +494,6 @@ Workspace skills in `.crew/skills/` override built-in skills with the same name.
 
 ---
 
-## Task Management
-
-### Task Lifecycle
-
-```
-crew run "goal" → Task created → Agent loop → State saved each iteration
-                                                    │
-                                              Ctrl+C interrupts
-                                                    │
-                                              crew resume <id>
-```
-
 ### Files
 
 ```
@@ -550,7 +504,6 @@ crew run "goal" → Task created → Agent loop → State saved each iteration
 ├── SOUL.md              # Personality
 ├── USER.md              # User info
 ├── HEARTBEAT.md         # Background tasks
-├── tasks/               # Task state (JSON)
 ├── sessions/            # Chat history (JSONL)
 ├── memory/              # Memory files
 │   ├── MEMORY.md        # Long-term
@@ -565,24 +518,9 @@ crew run "goal" → Task created → Agent loop → State saved each iteration
 
 ## Advanced Usage
 
-### Coordinator Mode
-
-For complex tasks, the coordinator decomposes work and delegates to workers:
-
-```bash
-crew run --coordinate "Implement user auth with login, logout, and password reset"
-```
-
-### Token Budgets
-
-```bash
-crew run --max-tokens 50000 "Large refactoring"
-```
-
 ### Verbose Mode
 
 ```bash
-crew run -v "Add logging"    # Shows full tool outputs
 crew chat -v                 # Shows tool execution details
 ```
 
@@ -602,17 +540,11 @@ Fix: `export ANTHROPIC_API_KEY="your-key"` or check with `crew status`.
 
 Retry mechanism handles this automatically (3 attempts with backoff). If persistent, try a different provider or wait.
 
-### Max Iterations Reached
-
-```bash
-crew resume <task-id> --max-iterations 100
-```
-
 ### Debug Logging
 
 ```bash
 RUST_LOG=debug crew chat
-RUST_LOG=crew_agent=trace crew run "task"
+RUST_LOG=crew_agent=trace crew chat --message "task"
 ```
 
 ### Environment Variables

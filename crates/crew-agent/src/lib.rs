@@ -18,8 +18,8 @@ pub use agent::{Agent, AgentConfig, ConversationResponse};
 pub use progress::{ConsoleReporter, ProgressEvent, ProgressReporter, SilentReporter};
 pub use skills::{SkillInfo, SkillsLoader};
 pub use tools::{
-    EditFileTool, GlobTool, GrepTool, ListDirTool, MessageTool, ReadFileTool, ShellTool, SpawnTool,
-    Tool, ToolRegistry, ToolResult, WebFetchTool, WebSearchTool, WriteFileTool,
+    EditFileTool, GlobTool, GrepTool, ListDirTool, MessageTool, ReadFileTool, ShellTool,
+    SpawnTool, Tool, ToolRegistry, ToolResult, WebFetchTool, WebSearchTool, WriteFileTool,
 };
 
 #[cfg(test)]

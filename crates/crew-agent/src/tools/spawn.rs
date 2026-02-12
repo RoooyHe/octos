@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use crew_core::{AgentId, AgentRole, InboundMessage, Task, TaskContext, TaskKind};
+use crew_core::{AgentId, InboundMessage, Task, TaskContext, TaskKind};
 use crew_llm::LlmProvider;
 use crew_memory::EpisodeStore;
 use eyre::{Result, WrapErr};
@@ -104,7 +104,7 @@ impl Tool for SpawnTool {
 
         tokio::spawn(async move {
             let tools = ToolRegistry::with_builtins(&working_dir);
-            let worker = Agent::new(wid.clone(), AgentRole::Worker, llm, tools, memory);
+            let worker = Agent::new(wid.clone(), llm, tools, memory);
 
             let subtask = Task::new(
                 TaskKind::Code {

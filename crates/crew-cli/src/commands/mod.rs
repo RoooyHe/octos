@@ -7,9 +7,6 @@ mod completions;
 mod cron;
 mod gateway;
 mod init;
-mod list;
-mod resume;
-mod run;
 mod status;
 
 use clap::{Parser, Subcommand};
@@ -22,9 +19,6 @@ pub use completions::CompletionsCommand;
 pub use cron::CronCommand;
 pub use gateway::GatewayCommand;
 pub use init::InitCommand;
-pub use list::ListCommand;
-pub use resume::ResumeCommand;
-pub use run::RunCommand;
 pub use status::StatusCommand;
 
 /// crew-rs: Rust-native coding agent orchestration.
@@ -47,17 +41,11 @@ pub enum Command {
     Cron(CronCommand),
     /// Initialize a new .crew configuration.
     Init(InitCommand),
-    /// Run a task with an agent.
-    Run(RunCommand),
-    /// Resume an interrupted task.
-    Resume(ResumeCommand),
-    /// List resumable tasks.
-    List(ListCommand),
-    /// Show details of a specific task.
+    /// Show system status.
     Status(StatusCommand),
     /// Run as a persistent messaging gateway.
     Gateway(GatewayCommand),
-    /// Clean up stale task state and cache files.
+    /// Clean up stale state and cache files.
     Clean(CleanCommand),
     /// Generate shell completions.
     Completions(CompletionsCommand),
@@ -75,9 +63,6 @@ impl Executable for Command {
             Self::Chat(cmd) => cmd.execute(),
             Self::Cron(cmd) => cmd.execute(),
             Self::Init(cmd) => cmd.execute(),
-            Self::Run(cmd) => cmd.execute(),
-            Self::Resume(cmd) => cmd.execute(),
-            Self::List(cmd) => cmd.execute(),
             Self::Status(cmd) => cmd.execute(),
             Self::Gateway(cmd) => cmd.execute(),
             Self::Clean(cmd) => cmd.execute(),

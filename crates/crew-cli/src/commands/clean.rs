@@ -1,4 +1,4 @@
-//! Clean command: remove stale task state files.
+//! Clean command: remove stale state files.
 
 use std::path::PathBuf;
 
@@ -8,14 +8,14 @@ use eyre::Result;
 
 use super::Executable;
 
-/// Clean up stale task state and cache files.
+/// Clean up stale state and cache files.
 #[derive(Debug, Args)]
 pub struct CleanCommand {
     /// Working directory (defaults to current directory).
     #[arg(short, long)]
     pub cwd: Option<PathBuf>,
 
-    /// Remove all task history (not just completed tasks).
+    /// Remove database files as well.
     #[arg(long)]
     pub all: bool,
 
@@ -39,25 +39,6 @@ impl Executable for CleanCommand {
 
         let mut files_to_remove = Vec::new();
         let mut total_size: u64 = 0;
-
-        // Find task state files
-        let tasks_dir = data_dir.join("tasks");
-        if tasks_dir.exists() {
-            for entry in std::fs::read_dir(&tasks_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if path.is_file() {
-                    // If --all, remove everything; otherwise only remove .json files
-                    if self.all || path.extension().is_some_and(|e| e == "json") {
-                        if let Ok(meta) = entry.metadata() {
-                            total_size += meta.len();
-                        }
-                        files_to_remove.push(path);
-                    }
-                }
-            }
-        }
 
         // Find database files if --all
         if self.all {
@@ -114,18 +95,8 @@ impl Executable for CleanCommand {
             println!("{}", "Dry run - no files were deleted.".yellow());
             println!("Run without --dry-run to actually delete files.");
         } else {
-            // Actually delete files
             for path in &files_to_remove {
                 std::fs::remove_file(path)?;
-            }
-
-            // Remove empty tasks directory
-            if tasks_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
-                    if entries.count() == 0 {
-                        std::fs::remove_dir(&tasks_dir)?;
-                    }
-                }
             }
 
             println!(

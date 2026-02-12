@@ -7,8 +7,7 @@ Rust-native AI agent framework with multi-channel gateway, 12+ LLM providers, an
 - **12+ LLM providers**: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, Groq, Moonshot, DashScope, MiniMax, Zhipu, Ollama, vLLM
 - **Multi-channel gateway**: CLI, Telegram, Discord, Slack, WhatsApp, Feishu/Lark
 - **Interactive chat**: Multi-turn conversation with readline history
-- **Task execution**: Run coding tasks with coordinator/worker pattern
-- **Resumable tasks**: Interrupt with Ctrl+C and resume later
+- **Single-message mode**: Non-interactive `crew chat --message "..."` for scripting
 - **Memory system**: Episodic memory, daily notes, long-term memory, bootstrap files
 - **Skills system**: Markdown-based skills with YAML frontmatter + 6 built-in skills
 - **Cron & heartbeat**: Scheduled tasks (interval, one-shot, cron expressions) and periodic background checks
@@ -44,8 +43,8 @@ export ANTHROPIC_API_KEY=your-key-here
 # Interactive chat
 crew chat
 
-# Run a one-shot task
-crew run "Add a hello function to lib.rs"
+# Single-message mode (non-interactive)
+crew chat --message "Add a hello function to lib.rs"
 
 # Check system status
 crew status
@@ -62,17 +61,7 @@ crew chat                          # Default provider
 crew chat --provider openai        # Use OpenAI
 crew chat --model gpt-4o           # Auto-detects OpenAI
 crew chat --verbose                # Show tool outputs
-```
-
-### `crew run <goal>`
-
-Execute a coding task:
-
-```bash
-crew run "Fix the bug in auth.rs"
-crew run "Refactor the API" --provider deepseek --verbose
-crew run "Add authentication" --coordinate    # Coordinator mode
-crew run "Quick fix" --max-iterations 10 --max-tokens 50000
+crew chat --message "Fix the bug"  # Single message, non-interactive
 ```
 
 ### `crew gateway`
@@ -101,13 +90,12 @@ Creates:
 - `.crew/USER.md` - User preferences
 - `.crew/memory/`, `.crew/sessions/`, `.crew/skills/` directories
 
-### `crew status [task-id]`
+### `crew status`
 
-Show system or task status:
+Show system status:
 
 ```bash
-crew status              # System status (config, API keys, bootstrap files)
-crew status abc123       # Task details
+crew status              # Config, API keys, bootstrap files
 ```
 
 ### `crew cron`
@@ -135,9 +123,7 @@ crew channels status
 ### Other Commands
 
 ```bash
-crew resume [task-id]    # Resume interrupted task
-crew list                # List resumable tasks
-crew clean [--all]       # Clean up state files
+crew clean [--all]       # Clean up state/database files
 crew completions <shell> # Generate shell completions
 ```
 
@@ -198,11 +184,11 @@ Provider is auto-detected from model name when not specified (e.g., `--model gpt
 crew-rs/
   crates/
     crew-core/      # Types, task model, message protocols
-    crew-memory/    # Episodic memory, task store, memory store
+    crew-memory/    # Episodic memory, memory store
     crew-llm/       # LLM provider abstraction (4 providers)
-    crew-agent/     # Agent runtime, tools, skills, coordination
+    crew-agent/     # Agent runtime, tools, skills
     crew-bus/       # Message bus, channels, sessions, cron, heartbeat
-    crew-cli/       # CLI interface (chat, run, gateway, init, status)
+    crew-cli/       # CLI interface (chat, gateway, init, status)
 ```
 
 ### Built-in Tools
@@ -221,8 +207,6 @@ crew-rs/
 | `message` | Send cross-channel messages |
 | `spawn` | Launch background subagents |
 | `cron` | Schedule recurring tasks |
-| `delegate_task` | (Coordinator) Delegate subtask |
-| `delegate_batch` | (Coordinator) Parallel delegation |
 
 ### Gateway Channels
 
@@ -239,7 +223,7 @@ crew-rs/
 
 ```bash
 cargo build --workspace           # Build
-cargo test --workspace            # Test (133+ tests)
+cargo test --workspace            # Test (129+ tests)
 cargo clippy --workspace          # Lint
 cargo fmt --all                   # Format
 ```

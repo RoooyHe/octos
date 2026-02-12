@@ -7,7 +7,7 @@ crew-rs is a 6-crate Rust workspace providing both a coding agent CLI and a mult
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        crew-cli                             │
-│          (CLI: chat, run, gateway, init, status)            │
+│           (CLI: chat, gateway, init, status)                │
 ├──────────────────────────┬──────────────────────────────────┤
 │       crew-agent         │           crew-bus               │
 │  (Agent, Tools, Skills)  │  (Channels, Sessions, Cron)     │
@@ -28,7 +28,7 @@ Shared types with no internal dependencies.
 
 - `Task`, `TaskKind`, `TaskStatus`, `TaskContext` - Task model with UUID v7 IDs
 - `Message`, `MessageRole` - Conversation messages
-- `AgentId`, `AgentRole` - Agent identification
+- `AgentId` - Agent identification
 - `InboundMessage`, `OutboundMessage` - Gateway protocol with metadata
 - `SessionKey` - Channel:chat_id session routing
 - `TokenUsage` - Token tracking
@@ -58,7 +58,6 @@ pub trait LlmProvider: Send + Sync {
 Persistence layer.
 
 - `EpisodeStore` - redb database for task completion summaries
-- `TaskStore` - JSON files for task state (enables Ctrl+C resume)
 - `MemoryStore` - Long-term memory (MEMORY.md), daily notes (YYYY-MM-DD.md), recent memories (7-day window)
 
 ### crew-agent
@@ -68,11 +67,10 @@ Agent runtime and tool system.
 **Agent**: Core execution loop with `run_task()` and `process_message()` methods.
 
 **ToolRegistry**: HashMap of `Arc<dyn Tool>` with presets:
-- `with_builtins()` - Worker tools
-- `with_coordinator_tools()` - Adds delegate_task/delegate_batch
+- `with_builtins()` - Standard tools
 - `register_arc()` - For tools needing shared references (message, spawn)
 
-**Built-in tools** (14):
+**Built-in tools** (12):
 
 | Category | Tools |
 |----------|-------|
@@ -81,7 +79,6 @@ Agent runtime and tool system.
 | Execution | shell (with SafePolicy) |
 | Web | web_search, web_fetch |
 | Gateway | message, spawn, cron |
-| Coordination | delegate_task, delegate_batch |
 
 **Skills**: Markdown files with YAML frontmatter, loaded from `.crew/skills/`. Support `always: true` for auto-inclusion in system prompt. 6 built-in skills bundled at compile time via `include_str!()` (cron, github, skill-creator, summarize, tmux, weather). Workspace skills override built-ins with the same name.
 
@@ -117,7 +114,7 @@ pub trait Channel: Send + Sync {
 
 CLI interface and configuration.
 
-**Commands**: chat, init, run, resume, list, status, gateway, clean, completions, cron (list/add/remove/enable), channels (status)
+**Commands**: chat, init, status, gateway, clean, completions, cron (list/add/remove/enable), channels (status)
 
 **Config**: Loaded from `.crew/config.json` or `~/.config/crew/config.json`. Supports `${VAR}` expansion. Provider auto-detect via `detect_provider()`. Versioned config with automatic migration framework (`migrate_config()`).
 
@@ -150,33 +147,6 @@ Channel → InboundMessage → MessageBus → Agent.process_message()
 
 System messages (cron, heartbeat, spawn results) flow through the same bus with `channel: "system"` and metadata routing.
 
-### Task Execution (crew run)
-
-```
-CLI args → Task → Agent.run_task_resumable()
-                       │
-                       ├─ Build messages (system + episodic context)
-                       ├─ Call LLM with tool specs
-                       ├─ Execute tools (loop)
-                       ├─ Save state after each iteration
-                       └─ Return TaskResult
-```
-
-## Coordinator Pattern
-
-```
-Coordinator (has delegate_task + delegate_batch tools)
-    │
-    ├─ Analyze goal
-    ├─ Decompose into subtasks
-    ├─ Spawn Worker agents via tokio::spawn
-    └─ Aggregate results
-
-Worker (has file/shell/search tools)
-    │
-    └─ Execute subtask directly
-```
-
 ## File Layout
 
 ```
@@ -187,13 +157,13 @@ crates/
 │   ├── lib.rs, provider.rs, config.rs, types.rs, retry.rs
 │   ├── anthropic.rs, openai.rs, gemini.rs, openrouter.rs
 ├── crew-memory/src/
-│   ├── lib.rs, episode.rs, store.rs, task_store.rs, memory_store.rs
+│   ├── lib.rs, episode.rs, store.rs, memory_store.rs
 ├── crew-agent/src/
 │   ├── lib.rs, agent.rs, progress.rs, policy.rs, skills.rs, builtin_skills.rs
 │   ├── skills/ (cron, github, skill-creator, summarize, tmux, weather SKILL.md)
 │   └── tools/ (mod, shell, read_file, write_file, edit_file, list_dir,
 │               glob_tool, grep_tool, web_search, web_fetch,
-│               delegate, delegate_batch, message, spawn)
+│               message, spawn)
 ├── crew-bus/src/
 │   ├── lib.rs, bus.rs, channel.rs, session.rs
 │   ├── cli_channel.rs, telegram_channel.rs, discord_channel.rs
@@ -201,8 +171,8 @@ crates/
 │   ├── cron_service.rs, cron_types.rs, heartbeat.rs
 └── crew-cli/src/
     ├── main.rs, config.rs, cron_tool.rs
-    └── commands/ (mod, chat, init, run, resume, list, status,
-                   gateway, clean, completions, cron, channels)
+    └── commands/ (mod, chat, init, status, gateway,
+                   clean, completions, cron, channels)
 ```
 
 ## Security
@@ -214,7 +184,7 @@ crates/
 
 ## Testing
 
-133+ tests across all crates. Categories:
+129+ tests across all crates. Categories:
 - Unit: type serde, tool arg parsing, config validation, provider detection
 - Integration: CLI commands, file tools, session persistence, cron jobs
 - Channel: allowed_senders, message parsing, dedup logic

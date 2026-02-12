@@ -5,11 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crew_core::{
-    AgentId, AgentRole, Message, MessageRole, Task, TaskResult, TaskStatus, TokenUsage,
-};
+use crew_core::{AgentId, Message, MessageRole, Task, TaskResult, TokenUsage};
 use crew_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason};
-use crew_memory::{Episode, EpisodeOutcome, EpisodeStore, TaskState, TaskStore};
+use crew_memory::{Episode, EpisodeOutcome, EpisodeStore};
 use eyre::Result;
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -31,7 +29,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_iterations: 50,
-            max_tokens: None, // Unlimited by default
+            max_tokens: None,
             save_episodes: true,
         }
     }
@@ -49,8 +47,6 @@ pub struct ConversationResponse {
 pub struct Agent {
     /// Unique identifier for this agent.
     pub id: AgentId,
-    /// Role of this agent (Coordinator or Worker).
-    pub role: AgentRole,
     /// LLM provider for generating responses.
     llm: Arc<dyn LlmProvider>,
     /// Tool registry for executing tool calls.
@@ -71,19 +67,14 @@ impl Agent {
     /// Create a new agent.
     pub fn new(
         id: AgentId,
-        role: AgentRole,
         llm: Arc<dyn LlmProvider>,
         tools: ToolRegistry,
         memory: Arc<EpisodeStore>,
     ) -> Self {
-        let system_prompt = match role {
-            AgentRole::Coordinator => include_str!("prompts/coordinator.txt").to_string(),
-            AgentRole::Worker => include_str!("prompts/worker.txt").to_string(),
-        };
+        let system_prompt = include_str!("prompts/worker.txt").to_string();
 
         Self {
             id,
-            role,
             llm,
             tools,
             memory,
@@ -118,7 +109,7 @@ impl Agent {
         self
     }
 
-    /// Process a single message in conversation mode (gateway).
+    /// Process a single message in conversation mode (chat/gateway).
     /// Takes the user's message and conversation history, runs the agent loop,
     /// and returns the response.
     pub async fn process_message(
@@ -211,34 +202,13 @@ impl Agent {
         }
     }
 
-    /// Run a task to completion.
+    /// Run a task to completion (used by spawn tool).
     pub async fn run_task(&self, task: &Task) -> Result<TaskResult> {
-        self.run_task_internal(task, None, None).await
-    }
-
-    /// Run a task with state persistence for resume capability.
-    pub async fn run_task_resumable(
-        &self,
-        task: &Task,
-        task_store: &TaskStore,
-        existing_state: Option<TaskState>,
-    ) -> Result<TaskResult> {
-        self.run_task_internal(task, Some(task_store), existing_state)
-            .await
-    }
-
-    async fn run_task_internal(
-        &self,
-        task: &Task,
-        task_store: Option<&TaskStore>,
-        existing_state: Option<TaskState>,
-    ) -> Result<TaskResult> {
         let task_start = Instant::now();
         let span = info_span!(
             "task",
             task_id = %task.id,
             agent_id = %self.id,
-            role = ?self.role,
         );
 
         async {
@@ -248,105 +218,50 @@ impl Agent {
             });
 
             let mut iteration = 0u32;
-
-            // Resume from existing state or start fresh
-            let (mut messages, mut total_usage, mut files_modified, is_coordinator) =
-                if let Some(state) = existing_state {
-                    info!("resuming from saved state");
-                    (
-                        state.messages,
-                        state.token_usage,
-                        state.files_modified,
-                        state.is_coordinator,
-                    )
-                } else {
-                    (
-                        self.build_initial_messages(task).await,
-                        TokenUsage::default(),
-                        Vec::new(),
-                        self.role == AgentRole::Coordinator,
-                    )
-                };
-
+            let mut messages = self.build_initial_messages(task).await;
+            let mut total_usage = TokenUsage::default();
+            let mut files_modified = Vec::new();
             let config = ChatConfig::default();
 
-            // Save initial state
-            if let Some(store) = task_store {
-                let mut task_mut = task.clone();
-                task_mut.status = TaskStatus::InProgress {
-                    agent_id: self.id.clone(),
-                };
-                let state = TaskState {
-                    task: task_mut,
-                    messages: messages.clone(),
-                    files_modified: files_modified.clone(),
-                    token_usage: total_usage.clone(),
-                    is_coordinator,
-                };
-                store.save(&state).await?;
-            }
-
-            // Agent loop: prompt -> response -> tools -> repeat
             loop {
-                // Check for shutdown signal
                 if self.shutdown.load(Ordering::Relaxed) {
                     info!(iteration, "shutdown signal received");
                     self.reporter
                         .report(ProgressEvent::TaskInterrupted { iterations: iteration });
-
-                    // State is already saved, just return partial result
                     return Ok(TaskResult {
                         success: false,
-                        output: "Task interrupted by user. State saved for resume.".to_string(),
+                        output: "Task interrupted.".to_string(),
                         files_modified,
                         subtasks: Vec::new(),
                         token_usage: total_usage,
                     });
                 }
 
-                // Check max iterations
                 if iteration >= self.config.max_iterations {
-                    warn!(
-                        iteration,
-                        max = self.config.max_iterations,
-                        "hit max iterations limit"
-                    );
+                    warn!(iteration, max = self.config.max_iterations, "hit max iterations limit");
                     self.reporter.report(ProgressEvent::MaxIterationsReached {
                         limit: self.config.max_iterations,
                     });
-
                     return Ok(TaskResult {
                         success: false,
-                        output: format!(
-                            "Task stopped after {} iterations (limit). State saved for resume.",
-                            iteration
-                        ),
+                        output: format!("Task stopped after {} iterations (limit).", iteration),
                         files_modified,
                         subtasks: Vec::new(),
                         token_usage: total_usage,
                     });
                 }
 
-                // Check token budget
                 if let Some(max_tokens) = self.config.max_tokens {
                     let used = total_usage.input_tokens + total_usage.output_tokens;
                     if used >= max_tokens {
-                        warn!(
-                            used,
-                            max = max_tokens,
-                            "hit token budget limit"
-                        );
+                        warn!(used, max = max_tokens, "hit token budget limit");
                         self.reporter.report(ProgressEvent::TokenBudgetExceeded {
                             used,
                             limit: max_tokens,
                         });
-
                         return Ok(TaskResult {
                             success: false,
-                            output: format!(
-                                "Task stopped after {} tokens (budget: {}). State saved for resume.",
-                                used, max_tokens
-                            ),
+                            output: format!("Task stopped after {} tokens (budget: {}).", used, max_tokens),
                             files_modified,
                             subtasks: Vec::new(),
                             token_usage: total_usage,
@@ -356,9 +271,7 @@ impl Agent {
 
                 iteration += 1;
                 let iter_start = Instant::now();
-
-                self.reporter
-                    .report(ProgressEvent::Thinking { iteration });
+                self.reporter.report(ProgressEvent::Thinking { iteration });
 
                 let tools_spec = self.tools.specs();
                 let response = self.llm.chat(&messages, &tools_spec, &config).await?;
@@ -374,7 +287,6 @@ impl Agent {
                     "llm response"
                 );
 
-                // Report response
                 if let Some(ref content) = response.content {
                     self.reporter.report(ProgressEvent::Response {
                         content: content.clone(),
@@ -383,13 +295,7 @@ impl Agent {
                 }
 
                 match response.stop_reason {
-                    StopReason::EndTurn => {
-                        // Agent finished - delete saved state
-                        if let Some(store) = task_store {
-                            store.delete(&task.id).await?;
-                        }
-
-                        // Save episode to memory for future reference
+                    StopReason::EndTurn | StopReason::StopSequence => {
                         if self.config.save_episodes {
                             let summary = response.content.clone().unwrap_or_default();
                             let summary_truncated = if summary.len() > 500 {
@@ -409,8 +315,6 @@ impl Agent {
 
                             if let Err(e) = self.memory.store(episode).await {
                                 warn!(error = %e, "failed to save episode to memory");
-                            } else {
-                                debug!("saved episode to memory");
                             }
                         }
 
@@ -431,7 +335,6 @@ impl Agent {
                         return Ok(self.build_result(&response, total_usage, files_modified));
                     }
                     StopReason::ToolUse => {
-                        // Execute tools and continue
                         messages.push(self.response_to_message(&response));
                         let (tool_messages, tool_files, tool_tokens) =
                             self.execute_tools(&response).await?;
@@ -441,55 +344,13 @@ impl Agent {
                         files_modified.extend(tool_files);
                         total_usage.input_tokens += tool_tokens.input_tokens;
                         total_usage.output_tokens += tool_tokens.output_tokens;
-
-                        // Save state after each tool execution
-                        if let Some(store) = task_store {
-                            let mut task_mut = task.clone();
-                            task_mut.status = TaskStatus::InProgress {
-                                agent_id: self.id.clone(),
-                            };
-                            task_mut.updated_at = chrono::Utc::now();
-                            let state = TaskState {
-                                task: task_mut,
-                                messages: messages.clone(),
-                                files_modified: files_modified.clone(),
-                                token_usage: total_usage.clone(),
-                                is_coordinator,
-                            };
-                            store.save(&state).await?;
-                        }
                     }
                     StopReason::MaxTokens => {
-                        warn!(
-                            iteration,
-                            total_tokens = total_usage.input_tokens + total_usage.output_tokens,
-                            "hit max tokens, stopping"
-                        );
-
                         self.reporter.report(ProgressEvent::TaskCompleted {
                             success: false,
                             iterations: iteration,
                             duration: task_start.elapsed(),
                         });
-
-                        return Ok(self.build_result(&response, total_usage, files_modified));
-                    }
-                    StopReason::StopSequence => {
-                        if let Some(store) = task_store {
-                            store.delete(&task.id).await?;
-                        }
-
-                        self.reporter.report(ProgressEvent::TaskCompleted {
-                            success: true,
-                            iterations: iteration,
-                            duration: task_start.elapsed(),
-                        });
-
-                        info!(
-                            iterations = iteration,
-                            duration_ms = task_start.elapsed().as_millis() as u64,
-                            "task stopped by sequence"
-                        );
                         return Ok(self.build_result(&response, total_usage, files_modified));
                     }
                 }
@@ -547,11 +408,6 @@ impl Agent {
                     }
                     context_str.push('\n');
                 }
-
-                debug!(
-                    episode_count = episodes.len(),
-                    "found relevant past episodes"
-                );
 
                 messages.push(Message {
                     role: MessageRole::System,
@@ -639,23 +495,19 @@ impl Agent {
                         "tool completed"
                     );
 
-                    // Track files modified by this tool
                     if let Some(ref file) = tool_result.file_modified {
                         info!(tool = %tool_call.name, file = %file.display(), "file modified");
                         files_modified.push(file.clone());
-
                         self.reporter.report(ProgressEvent::FileModified {
                             path: file.display().to_string(),
                         });
                     }
 
-                    // Track tokens used (from delegate_task)
                     if let Some(tokens) = tool_result.tokens_used {
                         tokens_used.input_tokens += tokens.input_tokens;
                         tokens_used.output_tokens += tokens.output_tokens;
                     }
 
-                    // Report tool completion
                     let output_preview = if tool_result.output.len() > 200 {
                         format!("{}...", &tool_result.output[..200])
                     } else {

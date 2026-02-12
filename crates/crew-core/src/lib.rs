@@ -16,6 +16,4 @@ pub use error::{Error, ErrorKind, Result};
 pub use gateway::{InboundMessage, OutboundMessage};
 pub use message::AgentMessage;
 pub use task::{Task, TaskContext, TaskKind, TaskResult, TaskStatus, TokenUsage};
-pub use types::{
-    AgentId, AgentRole, EpisodeRef, Message, MessageRole, SessionKey, TaskId, ToolCall,
-};
+pub use types::{AgentId, EpisodeRef, Message, MessageRole, SessionKey, TaskId, ToolCall};

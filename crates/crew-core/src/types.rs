@@ -51,16 +51,6 @@ impl std::fmt::Display for AgentId {
     }
 }
 
-/// Agent role in the coordination hierarchy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentRole {
-    /// Coordinator: plans and delegates tasks to workers.
-    Coordinator,
-    /// Worker: executes tasks and reports results.
-    Worker,
-}
-
 /// A message in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -144,16 +134,6 @@ mod tests {
     fn test_agent_id() {
         let id = AgentId::new("worker-1");
         assert_eq!(id.to_string(), "worker-1");
-    }
-
-    #[test]
-    fn test_agent_role_serialization() {
-        let role = AgentRole::Coordinator;
-        let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, r#""coordinator""#);
-
-        let parsed: AgentRole = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, AgentRole::Coordinator);
     }
 
     #[test]
