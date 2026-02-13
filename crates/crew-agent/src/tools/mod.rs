@@ -164,6 +164,9 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
+#[cfg(feature = "browser")]
+pub mod browser;
+
 pub use diff_edit::DiffEditTool;
 pub use edit_file::EditFileTool;
 pub use glob_tool::GlobTool;
@@ -176,6 +179,9 @@ pub use spawn::SpawnTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
+
+#[cfg(feature = "browser")]
+pub use browser::BrowserTool;
 
 use std::path::{Component, Path};
 
@@ -257,6 +263,8 @@ impl ToolRegistry {
         registry.register(ListDirTool::new(cwd));
         registry.register(WebSearchTool::new());
         registry.register(WebFetchTool::new());
+        #[cfg(feature = "browser")]
+        registry.register(BrowserTool::new());
         registry
     }
 }
