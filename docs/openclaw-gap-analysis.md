@@ -2,127 +2,65 @@
 
 Based on analysis of [openclaw/openclaw](https://github.com/openclaw/openclaw) (Feb 2026).
 
+**Status: ALL 9 ITEMS COMPLETE** (implemented Feb 2026)
+
 ## Current Parity
 
-crew-rs already has: tool registry, path traversal protection, MCP support, session management, shell sandbox (bwrap/macOS), cron scheduling, SSRF protection, plugin system.
+crew-rs already has: tool registry, path traversal protection, MCP support, session management, shell sandbox (bwrap/macOS/Docker), cron scheduling, SSRF protection, plugin system, tool policies, context compaction, config hot-reload, hybrid memory search, message coalescing, session forking.
 
-## High-Value Gaps
+## Implemented Items
 
-### 1. Tool Policy System (Priority: HIGH, Effort: Medium ~150 lines)
+### 1. Tool Policy System - DONE
 
-OpenClaw uses 6-layer hierarchical tool filtering:
-1. Tool profiles (minimal, coding, messaging, full)
-2. Global allow/deny lists
-3. Provider-specific overrides
-4. Agent-level overrides
-5. Group-based permissions
-6. Sandbox restrictions
+`ToolPolicy` with allow/deny lists, deny-wins semantics, wildcard matching (`exec*`).
+Implemented in `crew-agent/src/tools/policy.rs`.
 
-Key patterns:
-- `ToolPolicy { allow: Vec<String>, deny: Vec<String> }` with deny-wins semantics
-- Wildcard matching: `exec*` matches `exec`, `exec_bg`
-- `alsoAllow` for additive policies without override
-- Owner-only tool gates (restrict sensitive tools to session owner)
+### 2. Tool Groups - DONE
 
-**crew-rs today**: Flat registry with `retain()` filter. No allow/deny, no profiles, no per-provider policies.
+Named groups (`group:fs`, `group:runtime`, `group:web`, `group:sessions`, `group:memory`) expanding to tool sets. Integrated with ToolPolicy.
+Implemented in `crew-agent/src/tools/policy.rs`.
 
-### 2. Tool Groups (Priority: HIGH, Effort: Small ~50 lines)
+### 3. Context Compaction - DONE
 
-Named groups that expand to tool sets:
-- `group:fs` -> read_file, write_file, edit_file, diff_edit
-- `group:runtime` -> shell
-- `group:memory` -> memory_search, memory_get
-- `group:web` -> web_search, web_fetch
-- `group:sessions` -> spawn
+Token-aware message compaction: estimates tokens, strips tool arguments, summarizes first lines, preserves recent tool call/result pairs.
+Implemented in `crew-agent/src/compaction.rs`.
 
-Enables concise policy expressions like `{ allow: ["group:fs", "group:web"] }`.
+### 4. Config Hot-Reload - DONE
 
-**crew-rs today**: No grouping concept.
+SHA-256 hash-based change detection with hot-reload for system prompt and restart-required for provider/model changes. Watches config, AGENTS.md, SOUL.md, USER.md.
+Implemented in `crew-cli/src/config_watcher.rs`.
 
-### 3. Context Compaction (Priority: HIGH, Effort: Medium ~200 lines)
+### 5. Hybrid Memory Search - DONE
 
-Token-aware message summarization when context window fills:
-- Estimate tokens per message
-- Split history into chunks by token count
-- Summarize old chunks to 40% of original size (BASE_CHUNK_RATIO)
-- Never compress below 15% (MIN_CHUNK_RATIO)
-- Strip `toolResult.details` from summaries (security: untrusted payloads)
-- Keep recent messages intact
-- Safety margin: 1.2x buffer for estimation inaccuracy
+BM25 + vector (cosine similarity) hybrid ranking with configurable alpha. HNSW index via `hnsw_rs`, L2-normalized embeddings. Falls back to BM25-only when no embedding provider configured.
+Implemented in `crew-memory/src/hybrid_search.rs`.
 
-**crew-rs today**: Simple history truncation by message count. No token-aware compaction.
+### 6. Streaming Block Coalescing - DONE
 
-### 4. Config Hot-Reload (Priority: MEDIUM, Effort: Medium ~120 lines)
+Channel-aware message splitting: paragraph > newline > sentence > space > hard cut. Per-channel limits (Telegram 4000, Discord 1900, Slack 3900). MAX_CHUNKS (50) DoS limit. UTF-8 safe boundary detection.
+Implemented in `crew-bus/src/coalesce.rs`.
 
-Chokidar watcher with hierarchical reload rules:
-- SHA-256 hash to detect changes
-- Debounce 300ms to prevent thrashing
-- Rules per config path: hot (live update) vs restart vs ignore
-- Hot-applicable: channels, agents, tools, cron, hooks, sessions
-- Restart-required: gateway port, bind, auth, TLS
+### 7. Session Forking - DONE
 
-**crew-rs today**: Static config, requires full restart.
+`/new` command creates child session with `parent_key` tracking. Copies last N messages from parent. Namespaced by sender_id + timestamp. Persisted via JSONL with percent-encoded filenames.
+Implemented in `crew-bus/src/session.rs` (fork method) and `crew-cli/src/commands/gateway.rs` (/new handler).
 
-### 5. Hybrid Memory Search (Priority: HIGH, Effort: Large ~500 lines)
+### 8. Docker Sandbox - DONE
 
-Vector + BM25 hybrid search:
-- Backend: SQLite with vector extension
-- Chunking: 400-token chunks with 80-token overlap
-- Ranking: 0.7 * vectorScore + 0.3 * bm25Score
-- Candidate multiplier: fetch 4x, re-rank to top N
-- Sources: workspace markdown + session transcripts
-- Min score threshold: 0.35, max results: 6
-- Incremental sync: watch files, index on search
+`SandboxMode::Docker` with `DockerConfig`: image selection, mount modes (none/ro/rw), resource limits (CPU, memory, PIDs), network isolation, environment sanitization (18 blocked vars via shared `BLOCKED_ENV_VARS`). Path validation rejects `:`, `\0`, `\n`, `\r`.
+Implemented in `crew-agent/src/sandbox.rs`.
 
-**crew-rs today**: Simple MEMORY.md + daily notes (7-day window). No semantic search.
+### 9. Provider-Specific Tool Policies - DONE
 
-### 6. Streaming Block Coalescing (Priority: LOW, Effort: Small ~80 lines)
+`tools.byProvider` config maps model ID prefixes to ToolPolicy. Applied at both spec filtering and execution time. Propagated to subagents via spawn tool.
+Implemented in `crew-cli/src/config.rs` and `crew-agent/src/tools/policy.rs`.
 
-Channel-aware response chunking:
-- Break preference: paragraph > newline > sentence > length
-- Configurable min/max chars per block
-- Channel-specific limits (Discord shorter, Telegram longer)
-- Flush on paragraph boundary
-
-**crew-rs today**: Basic SSE broadcast, no intelligent chunking.
-
-### 7. Session Forking (Priority: LOW, Effort: Small ~60 lines)
-
-Parent UUID tracking for branched conversations:
-- `/new` creates child session with parent reference
-- Preserves thinking/verbose level overrides across fork
-- Delivery context tracking (last channel/recipient)
-
-**crew-rs today**: Single linear session per key.
-
-### 8. Docker Sandbox (Priority: MEDIUM, Effort: Large ~300 lines)
-
-Container pooling with scope isolation:
-- Scope: session (most isolated), agent (balanced), shared (efficient)
-- Hot container reuse: 5-minute window
-- Workspace mount modes: none, read-only, read-write
-- Resource limits: CPU, memory, PIDs, ulimits
-- Environment sanitization: block LD_PRELOAD, NODE_OPTIONS, etc.
-- Container prefix naming for cleanup
-
-**crew-rs today**: bwrap (Linux) and sandbox-exec (macOS) only. No container support.
-
-### 9. Provider-Specific Tool Policies (Priority: LOW, Effort: Small ~40 lines)
-
-Different tool sets per LLM model:
-- `tools.byProvider["openai/gpt-4"]` -> { allow, deny }
-- Match model ID at runtime, filter before agent invocation
-- Useful for models that don't support certain tool schemas
-
-**crew-rs today**: Same tools for all providers.
-
-## Implementation Order
+## Implementation Order (Completed)
 
 ```
-Phase A (Foundation):  Tool groups -> Tool policies -> Provider policies
-Phase B (Intelligence): Context compaction -> Hybrid memory search
-Phase C (Operations):  Config hot-reload -> Docker sandbox
-Phase D (Polish):      Streaming coalescing -> Session forking
+Phase A: Tool groups + Tool policies + Provider policies
+Phase B: Context compaction
+Phase C: Config hot-reload
+Phase D: Hybrid memory search
+Phase E: Message coalescing + Session forking + Docker sandbox
 ```
-
-Each phase is independently shippable. Phases A and B have highest ROI.

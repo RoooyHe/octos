@@ -12,8 +12,13 @@ Rust-native AI agent framework with multi-channel gateway, 12+ LLM providers, an
 - **Media handling**: Auto-download photos, voice, audio, documents from channels
 - **Interactive chat**: Multi-turn conversation with readline history
 - **Single-message mode**: Non-interactive `crew chat --message "..."` for scripting
-- **Memory system**: Episodic memory, daily notes, long-term memory, bootstrap files
+- **Memory system**: Episodic memory, daily notes, long-term memory, hybrid BM25+vector search
 - **Skills system**: Markdown-based skills with YAML frontmatter + 6 built-in skills
+- **Sandbox isolation**: bwrap (Linux), sandbox-exec (macOS), Docker with resource limits
+- **Tool policies**: Allow/deny lists, wildcard matching, named groups, provider-specific filtering
+- **Context compaction**: Token-aware message summarization when context window fills
+- **Config hot-reload**: SHA-256 change detection, live system prompt updates
+- **Message coalescing**: Channel-aware response splitting (Telegram/Discord/Slack limits)
 - **Skill install**: Install skills from GitHub repos with `crew skills install`
 - **Cron & heartbeat**: Scheduled tasks (interval, one-shot, cron expressions) and periodic background checks
 - **Subagent spawning**: Background agents for long-running tasks
@@ -256,7 +261,7 @@ crew-rs/
 
 ```bash
 cargo build --workspace           # Build
-cargo test --workspace            # Test (133+ tests)
+cargo test --workspace            # Test (253+ tests)
 cargo clippy --workspace          # Lint
 cargo fmt --all                   # Format
 ```
