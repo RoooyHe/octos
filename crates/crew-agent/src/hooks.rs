@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
 
 use crate::sandbox::BLOCKED_ENV_VARS;
@@ -208,27 +208,33 @@ impl HookExecutor {
 
         let mut child = cmd.spawn()?;
 
-        // Write payload to stdin
+        // Write payload to stdin inline (payload is small JSON, no need to spawn)
         if let Some(mut stdin) = child.stdin.take() {
-            let payload = payload_json.to_string();
-            tokio::spawn(async move {
-                let _ = stdin.write_all(payload.as_bytes()).await;
-                let _ = stdin.shutdown().await;
-            });
+            let _ = stdin.write_all(payload_json.as_bytes()).await;
+            let _ = stdin.shutdown().await;
         }
 
-        // Wait with timeout
+        // Take stdout handle so we can read it after wait
+        let stdout_handle = child.stdout.take();
+
+        // Wait with timeout (use wait() instead of wait_with_output() so child isn't consumed)
         let timeout = Duration::from_millis(hook.timeout_ms);
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let code = output.status.code().unwrap_or(2);
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => {
+                let stdout = if let Some(mut handle) = stdout_handle {
+                    let mut buf = Vec::new();
+                    let _ = handle.read_to_end(&mut buf).await;
+                    String::from_utf8_lossy(&buf).trim().to_string()
+                } else {
+                    String::new()
+                };
+                let code = status.code().unwrap_or(2);
                 Ok((code, stdout))
             }
             Ok(Err(e)) => Err(e.into()),
             Err(_) => {
-                // Timeout: child was consumed by wait_with_output future which was dropped,
-                // so the process will be cleaned up when the future is dropped.
+                // Timeout: kill the child process to prevent orphans
+                let _ = child.kill().await;
                 Err(eyre::eyre!("hook timed out after {}ms", hook.timeout_ms))
             }
         }
