@@ -164,6 +164,7 @@ impl McpClient {
             .stderr(Stdio::inherit()); // Forward stderr for debugging
 
         for (k, v) in &config.env {
+            // Case-insensitive: env vars are case-insensitive on Windows
             if BLOCKED_ENV_VARS.iter().any(|blocked| k.eq_ignore_ascii_case(blocked)) {
                 warn!(key = k, "blocked dangerous MCP environment variable, skipping");
                 continue;

@@ -148,14 +148,7 @@ impl Tool for WebFetchTool {
             body
         };
 
-        if content.len() > input.max_chars {
-            let mut limit = input.max_chars;
-            while limit > 0 && !content.is_char_boundary(limit) {
-                limit -= 1;
-            }
-            content.truncate(limit);
-            content.push_str("\n\n... (content truncated)");
-        }
+        crew_core::truncate_utf8(&mut content, input.max_chars, "\n\n... (content truncated)");
 
         let mut output = format!("URL: {final_url}\n");
         if final_url != input.url {

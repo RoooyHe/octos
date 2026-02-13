@@ -183,14 +183,7 @@ async fn imap_poll(
             let from = extract_header(&parsed, "From").unwrap_or_default();
             let subject = extract_header(&parsed, "Subject").unwrap_or_default();
             let mut text_body = extract_text_body(&parsed).unwrap_or_default();
-            if text_body.len() > config.max_body_chars {
-                let mut limit = config.max_body_chars;
-                while limit > 0 && !text_body.is_char_boundary(limit) {
-                    limit -= 1;
-                }
-                text_body.truncate(limit);
-                text_body.push_str("...");
-            }
+            crew_core::truncate_utf8(&mut text_body, config.max_body_chars, "...");
 
             if !text_body.is_empty() {
                 parsed_emails.push((from, subject, text_body));

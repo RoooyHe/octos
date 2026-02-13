@@ -199,9 +199,9 @@ impl Sandbox for MacosSandbox {
     fn wrap_command(&self, shell_command: &str, cwd: &Path) -> Command {
         let cwd_str = cwd.to_string_lossy();
 
-        // Reject paths with control characters to prevent SBPL profile injection.
-        // Fail closed: return a command that exits with error instead of running unsandboxed.
-        if cwd_str.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        // Reject paths with control characters or SBPL metacharacters to prevent
+        // sandbox profile injection. Fail closed: error instead of running unsandboxed.
+        if cwd_str.bytes().any(|b| b < 0x20 || b == 0x7F || b == b'(' || b == b')') {
             tracing::error!("cwd contains control characters, refusing to execute");
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg("echo 'sandbox error: cwd contains invalid characters' >&2; exit 1");
@@ -286,7 +286,9 @@ impl Sandbox for DockerSandbox {
 
         // Workspace mount — validate path to prevent volume mount injection via ':'
         let cwd_str = cwd.to_string_lossy();
-        if cwd_str.contains(':') || cwd_str.contains('\0') {
+        if cwd_str.contains(':') || cwd_str.contains('\0')
+            || cwd_str.contains('\n') || cwd_str.contains('\r')
+        {
             tracing::error!("cwd contains invalid characters for Docker mount, refusing to execute");
             let mut fail = Command::new("sh");
             fail.arg("-c").arg("echo 'sandbox error: cwd contains invalid characters' >&2; exit 1");
@@ -546,6 +548,39 @@ mod tests {
         // Must NOT execute the original command unsandboxed
         assert!(args.iter().any(|a| a.contains("exit 1")));
         assert!(!args.iter().any(|a| a.contains("ls")));
+    }
+
+    #[test]
+    fn test_docker_sandbox_rejects_newline_in_path() {
+        let sb = DockerSandbox {
+            config: DockerConfig::default(),
+            allow_network: false,
+        };
+        let cmd = sb.wrap_command("ls", Path::new("/tmp/evil\n--privileged"));
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(prog, "sh");
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.iter().any(|a| a.contains("exit 1")));
+    }
+
+    #[test]
+    fn test_macos_sandbox_rejects_parens() {
+        let sb = MacosSandbox {
+            allow_network: false,
+        };
+        let cmd = sb.wrap_command("ls", Path::new("/tmp/(allow network*)"));
+        let prog = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert_eq!(prog, "sh");
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.iter().any(|a| a.contains("exit 1")));
     }
 
     #[test]

@@ -42,6 +42,7 @@ pub fn split_message(text: &str, config: &ChunkConfig) -> Vec<String> {
     while !remaining.is_empty() {
         if chunks.len() >= MAX_CHUNKS {
             warn!(
+                original_chars = text.len(),
                 remaining_chars = remaining.len(),
                 "message exceeded {MAX_CHUNKS} chunks, truncating",
             );

@@ -151,14 +151,7 @@ impl Tool for ShellTool {
 
                 // Truncate if too long
                 const MAX_OUTPUT: usize = 50000;
-                if result_text.len() > MAX_OUTPUT {
-                    let mut limit = MAX_OUTPUT;
-                    while limit > 0 && !result_text.is_char_boundary(limit) {
-                        limit -= 1;
-                    }
-                    result_text.truncate(limit);
-                    result_text.push_str("\n... (output truncated)");
-                }
+                crew_core::truncate_utf8(&mut result_text, MAX_OUTPUT, "\n... (output truncated)");
 
                 result_text.push_str(&format!("\n\nExit code: {exit_code}"));
 
