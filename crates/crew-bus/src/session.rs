@@ -518,6 +518,13 @@ mod tests {
         assert_eq!(session.messages[0].content, "hello from oldest");
     }
 
+    #[test]
+    fn test_with_max_sessions_clamps_zero() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::open(tmp.path()).unwrap().with_max_sessions(0);
+        assert_eq!(mgr.capacity(), 1);
+    }
+
     /// Integration test: concurrent session processing via multiple tasks.
     /// Verifies that sessions created from parallel tasks don't corrupt each other
     /// and the LRU cache correctly evicts and reloads.

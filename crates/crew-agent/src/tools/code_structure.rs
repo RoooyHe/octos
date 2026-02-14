@@ -513,4 +513,20 @@ function greet(user: User): string {
         let result = parse_structure("", "haskell");
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_rejects_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let large_file = dir.path().join("big.rs");
+        std::fs::write(&large_file, "x".repeat(1_048_577)).unwrap();
+
+        let tool = CodeStructureTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"path": "big.rs"}))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.contains("file too large"));
+    }
 }

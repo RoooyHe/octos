@@ -267,7 +267,9 @@ fn git_diff(cwd: &std::path::Path, path: Option<&str>) -> Result<String> {
     let mut diffs = Vec::new();
 
     for entry in index.entries() {
-        let entry_path = entry.path(&index).to_str().ok().unwrap_or("").to_string();
+        let Some(entry_path) = entry.path(&index).to_str().ok().map(String::from) else {
+            continue; // Skip non-UTF-8 paths
+        };
 
         // Filter by path if specified
         if let Some(filter) = path {
@@ -417,6 +419,11 @@ fn git_blame(cwd: &std::path::Path, path: &str) -> Result<String> {
         eyre::bail!("invalid path: must not start with '-'");
     }
     let file_path = worktree.join(path);
+    if let Ok(meta) = std::fs::symlink_metadata(&file_path) {
+        if meta.is_symlink() {
+            eyre::bail!("symlinks are not allowed: {path}");
+        }
+    }
     if !file_path.exists() {
         eyre::bail!("file not found: {path}");
     }
@@ -437,7 +444,7 @@ fn git_blame(cwd: &std::path::Path, path: &str) -> Result<String> {
     let mut result = Vec::new();
     let mut current_hash = String::new();
     let mut current_author = String::new();
-    let mut line_num: usize = 0;
+    let mut line_num: usize = 1;
 
     for line in raw.lines() {
         if let Some(content) = line.strip_prefix('\t') {
@@ -677,5 +684,49 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_git_blame_rejects_dash_prefix() {
+        let dir = setup_git_repo();
+        let tool = GitTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"command": "blame", "path": "-L1,10"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("must not start with '-'"));
+    }
+
+    #[tokio::test]
+    async fn test_git_diff_skips_large_files() {
+        let dir = setup_git_repo();
+
+        // Create a file larger than 1 MB and commit it
+        let large_content = "x".repeat(1_048_577);
+        std::fs::write(dir.path().join("large.txt"), &large_content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "large.txt"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add large file"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Modify the large file so diff detects a change
+        std::fs::write(dir.path().join("large.txt"), "y".repeat(1_048_577)).unwrap();
+
+        let tool = GitTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"command": "diff"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("skipped (file too large)"));
     }
 }
