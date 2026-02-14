@@ -63,7 +63,7 @@ fn expand_group(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "group:fs" => Some(&["read_file", "write_file", "edit_file", "diff_edit"]),
         "group:runtime" => Some(&["shell"]),
-        "group:web" => Some(&["web_search", "web_fetch"]),
+        "group:web" => Some(&["web_search", "web_fetch", "browser"]),
         "group:search" => Some(&["glob", "grep", "list_dir"]),
         "group:sessions" => Some(&["spawn"]),
         _ => None,

@@ -57,6 +57,9 @@ cargo install --path crates/crew-cli
 # With messaging channels
 cargo install --path crates/crew-cli --features telegram,discord,slack,whatsapp,feishu,email
 
+# With browser automation (requires Chrome/Chromium)
+cargo install --path crates/crew-cli --features browser
+
 # Verify
 crew --version
 ```
@@ -613,7 +616,7 @@ Control which tools are available to the agent via `tools` in config:
 - `group:fs` -> read_file, write_file, edit_file, diff_edit
 - `group:runtime` -> shell
 - `group:search` -> glob, grep, list_dir
-- `group:web` -> web_search, web_fetch
+- `group:web` -> web_search, web_fetch, browser
 - `group:sessions` -> spawn
 
 **Wildcard matching**: `exec*` matches `exec`, `exec_bg`, etc.

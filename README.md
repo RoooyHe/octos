@@ -24,7 +24,7 @@ Rust-native AI agent framework with multi-channel gateway, 12+ LLM providers, an
 - **Subagent spawning**: Background agents for long-running tasks
 - **Cross-channel messaging**: Send messages across any connected channel
 - **Provider auto-detect**: Automatically selects provider from model name
-- **Built-in tools**: Shell, file ops, glob, grep, list_dir, web search/fetch, message, spawn, cron
+- **Built-in tools**: Shell, file ops, glob, grep, list_dir, web search/fetch, message, spawn, cron, browser (feature-gated)
 - **Config migration**: Versioned config with automatic migration
 - **Docker deployment**: Multi-stage Dockerfile + docker-compose for gateway and agent profiles
 
@@ -36,6 +36,9 @@ cargo install --path crates/crew-cli
 
 # With channel support
 cargo install --path crates/crew-cli --features telegram,discord,slack,email
+
+# With browser automation (requires Chrome/Chromium)
+cargo install --path crates/crew-cli --features browser
 
 # Or build locally
 cargo build --release
@@ -244,6 +247,7 @@ crew-rs/
 | `message` | Send cross-channel messages |
 | `spawn` | Launch background subagents |
 | `cron` | Schedule recurring tasks |
+| `browser` | Headless Chrome automation (feature: `browser`) |
 
 ### Gateway Channels
 

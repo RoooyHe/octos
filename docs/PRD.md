@@ -60,6 +60,7 @@ crew-rs is a Rust-native AI agent framework that provides both a coding automati
 | FR-3.9 | Tool groups (group:fs, group:runtime, group:web, etc.) | Done |
 | FR-3.10 | Provider-specific tool policies (tools.byProvider) | Done |
 | FR-3.11 | MCP server support (JSON-RPC stdio) | Done |
+| FR-3.12 | Browser automation (headless Chrome via CDP, feature-gated) | Done |
 
 ### FR-4: Gateway & Channels
 
@@ -151,6 +152,7 @@ crew-rs is a Rust-native AI agent framework that provides both a coding automati
 - **CLI**: Clap 4
 - **Readline**: rustyline
 - **Channels**: teloxide, serenity, tokio-tungstenite, async-imap, lettre
+- **Browser**: Chrome DevTools Protocol via tokio-tungstenite, which (Chrome discovery)
 - **Auth**: sha2, open (browser), base64
 - **Errors**: eyre/color-eyre
 
@@ -159,7 +161,7 @@ crew-rs is a Rust-native AI agent framework that provides both a coding automati
 ### Completed
 - [x] Core type system and task model
 - [x] 4 native LLM providers + 8 OpenAI-compatible
-- [x] 13 built-in tools
+- [x] 14 built-in tools (13 default + browser)
 - [x] 6 messaging channels
 - [x] Memory system (episodic + daily + long-term + bootstrap)
 - [x] Skills system

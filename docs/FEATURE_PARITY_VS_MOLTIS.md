@@ -12,7 +12,7 @@ Both are Rust, single-binary, multi-provider, sandboxed agent frameworks.
 |---|---|---|
 | Multi-provider LLM | 4 native + 8 compatible (12 total) | 16+ providers |
 | Streaming SSE | Per-provider parsers | WebSocket streaming |
-| Tool system | 13 built-in tools | Similar set |
+| Tool system | 14 built-in tools (13 default + browser) | Similar set |
 | Sandbox | bwrap / sandbox-exec / Docker | Docker / Apple Container |
 | MCP support | JSON-RPC stdio + HTTP/SSE | stdio + HTTP/SSE |
 | Skills system | SKILL.md + built-ins | SKILL.md + built-ins |
@@ -43,15 +43,15 @@ Both are Rust, single-binary, multi-provider, sandboxed agent frameworks.
 | # | Feature | Moltis Implementation | Improvement Potential for crew-rs |
 |---|---|---|---|
 | 1 | ~~**Hook/Lifecycle System**~~ | 17 lifecycle events (BeforeToolCall, BeforeLLMCall, MessageSending, etc.). Sequential for modifying, parallel for read-only. Shell protocol (JSON stdin, exit code + stdout). Circuit breaker (3 failures -> auto-disable). HOOK.md discovery. | **DONE** -- 4 events (before/after tool call, before/after LLM call). Shell protocol (JSON stdin, exit codes 0/1/2+). Circuit breaker with configurable threshold. Tool filtering. Env sanitization via BLOCKED_ENV_VARS. Wired into chat, gateway, serve. Config hot-reload aware. |
-| 2 | **Built-in Web UI** | SPA embedded via `include_dir!()`. WebSocket streaming. Settings panel. Hook editor. Session browser. | **MEDIUM** -- crew-rs has a REST API (feature-gated) but no bundled UI. Could embed a simple SPA for session browsing and config editing. |
+| 2 | ~~**Built-in Web UI**~~ | SPA embedded via `include_dir!()`. WebSocket streaming. Settings panel. Hook editor. Session browser. | **DONE** -- Embedded SPA via `rust-embed` at `/` with session sidebar, chat, SSE streaming, dark theme. |
 | 3 | **WebAuthn / Passkey Auth** | FIDO2 credentials (Touch ID, security keys). Stored in SQLite. | **LOW** -- crew-rs targets CLI/bot use cases where passkeys are less relevant. |
 | 4 | **Apple Container** (macOS native containers) | Native macOS containerization beyond sandbox-exec. | **LOW** -- crew-rs already has sandbox-exec. Apple Container is newer/niche. |
-| 5 | **Browser Automation** | Playwright-based browser tool with session pool. | **MEDIUM** -- Would enhance web interaction capabilities beyond fetch/search. |
+| 5 | ~~**Browser Automation**~~ | Playwright-based browser tool with session pool. | **DONE** -- Headless Chrome via CDP over tokio-tungstenite. Feature-gated `browser`. Actions: navigate (SSRF-protected), get_text, get_html, click, type, screenshot, evaluate, close. 5min idle timeout, env sanitization. |
 | 6 | **TTS (Text-to-Speech)** | Multiple TTS providers (ElevenLabs, etc.). | **LOW** -- Niche for CLI/bot agent. |
 | 7 | **Onboarding Wizard** | Guided first-run setup for identity, profile, personality. | **LOW** -- crew-rs has `crew init` which is simpler but sufficient. |
 | 8 | **Sandbox Image Management** | CLI commands: `sandbox list/build/clean/remove`. Deterministic image tags (hash of base + packages). Auto-rebuild on package change. | **LOW** -- Nice UX but not critical. |
-| 9 | **Message Queue Modes** | `followup` (replay each queued message) vs `collect` (concatenate). Handles messages arriving during active agent run. | **MEDIUM** -- crew-rs doesn't have explicit handling for messages arriving during an active run. |
-| 10 | **Prometheus Metrics** | `/metrics` endpoint, SQLite history for metrics. | **LOW** -- Observability improvement for production deployments. |
+| 9 | ~~**Message Queue Modes**~~ | `followup` (replay each queued message) vs `collect` (concatenate). Handles messages arriving during active agent run. | **DONE** -- `QueueMode::Followup` (FIFO) vs `QueueMode::Collect` (merge by session) via `gateway.queue_mode`. |
+| 10 | ~~**Prometheus Metrics**~~ | `/metrics` endpoint, SQLite history for metrics. | **DONE** -- `/metrics` endpoint with tool call counters/histograms and LLM token counters. |
 | 11 | **fd-lock for Sessions** | File-level locking prevents concurrent JSONL corruption. | **LOW** -- crew-rs uses atomic write-then-rename which is mostly safe. |
 | 12 | **Per-IP Rate Limiting** | Built-in throttling for unauthenticated traffic. `429 + Retry-After`. | **LOW** -- Only relevant for the REST API feature. |
 
@@ -98,14 +98,14 @@ Both are Rust, single-binary, multi-provider, sandboxed agent frameworks.
 
 9. ~~**`#![deny(unsafe_code)]`** workspace-wide~~ DONE -- Via `[workspace.lints.rust]`.
 
-10. **Built-in web UI** -- Embed a simple SPA for session browsing and config editing (significant effort).
+10. ~~**Built-in web UI**~~ DONE -- Embedded SPA via `rust-embed` at `/` with session sidebar, chat, SSE streaming, dark theme. Vanilla HTML/CSS/JS, no build tools.
 
-11. **Prometheus metrics endpoint** -- `/metrics` for production observability.
+11. ~~**Prometheus metrics endpoint**~~ DONE -- `/metrics` endpoint with `crew_tool_calls_total`, `crew_tool_call_duration_seconds`, `crew_llm_tokens_total` counters/histograms via `metrics` + `metrics-exporter-prometheus`.
 
-12. **Message queue modes** for gateway -- Handle messages arriving during an active agent run (followup vs collect modes).
+12. ~~**Message queue modes**~~ DONE -- `QueueMode::Followup` (FIFO, default) vs `QueueMode::Collect` (merge queued messages by session) via `gateway.queue_mode` config field.
 
 ---
 
 *Analysis date: 2026-02-13*
-*Last updated: 2026-02-13 (9 of 12 improvements implemented)*
+*Last updated: 2026-02-13 (12 of 12 improvements implemented -- feature parity complete)*
 *Sources: [Moltis GitHub](https://github.com/moltis-org/moltis), [DeepWiki](https://deepwiki.com/moltis-org/moltis)*

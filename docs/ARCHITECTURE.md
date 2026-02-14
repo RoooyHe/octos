@@ -446,7 +446,7 @@ pub struct ToolResult {
 
 **ToolRegistry**: `HashMap<String, Arc<dyn Tool>>` with `provider_policy: Option<ToolPolicy>` for soft filtering.
 
-### Built-in Tools (13)
+### Built-in Tools (14)
 
 | Tool | Parameters | Key Behavior |
 |---|---|---|
@@ -463,6 +463,7 @@ pub struct ToolResult {
 | **message** | content, channel?, chat_id? | Cross-channel messaging via OutboundMessage |
 | **spawn** | task, label?, mode="background", allowed_tools, context? | Subagent with inherited provider policy. sync=inline, background=async |
 | **cron** | action, message, schedule params | Schedule add/list/remove/enable/disable |
+| **browser** | action, url?, selector?, text?, expression? | Feature-gated (`browser`). Headless Chrome via CDP. Actions: navigate (SSRF check), get_text, get_html, click, type, screenshot, evaluate, close. 5min idle timeout, env sanitization |
 
 ### Tool Policies
 
@@ -473,7 +474,7 @@ pub struct ToolPolicy {
 }
 ```
 
-**Groups**: `group:fs` (read_file, write_file, edit_file, diff_edit), `group:runtime` (shell), `group:web` (web_search, web_fetch), `group:search` (glob, grep, list_dir), `group:sessions` (spawn).
+**Groups**: `group:fs` (read_file, write_file, edit_file, diff_edit), `group:runtime` (shell), `group:web` (web_search, web_fetch, browser), `group:search` (glob, grep, list_dir), `group:sessions` (spawn).
 
 **Wildcards**: `exec*` matches prefix. Provider-specific policies via config `tools.byProvider`.
 
@@ -987,6 +988,9 @@ whatsapp = ["tokio-tungstenite"]
 feishu   = ["tokio-tungstenite"]
 email    = ["async-imap", "tokio-rustls", "rustls", "webpki-roots", "lettre", "mailparse"]
 
+# crew-agent
+browser  = ["tokio-tungstenite", "which", "tempfile", "base64"]
+
 # crew-cli
 api      = ["axum", "tower-http", "futures"]
 telegram = ["crew-bus/telegram"]
@@ -995,6 +999,7 @@ slack    = ["crew-bus/slack"]
 whatsapp = ["crew-bus/whatsapp"]
 feishu   = ["crew-bus/feishu"]
 email    = ["crew-bus/email"]
+browser  = ["crew-agent/browser"]
 ```
 
 ---
@@ -1018,7 +1023,7 @@ crates/
 │   ├── skills/ (cron, github, skill-creator, summarize, tmux, weather SKILL.md)
 │   └── tools/ (mod, policy, shell, read_file, write_file, edit_file, diff_edit,
 │               list_dir, glob_tool, grep_tool, web_search, web_fetch,
-│               message, spawn)
+│               message, spawn, browser)
 ├── crew-bus/src/
 │   ├── lib.rs, bus.rs, channel.rs, session.rs, coalesce.rs, media.rs
 │   ├── cli_channel.rs, telegram_channel.rs, discord_channel.rs
@@ -1043,7 +1048,7 @@ crates/
 
 ### Execution Sandbox
 - Three backends: bwrap (Linux), sandbox-exec (macOS), Docker — `SandboxMode::Auto` detection
-- 18 BLOCKED_ENV_VARS shared across all sandbox backends and MCP server spawning
+- 18 BLOCKED_ENV_VARS shared across all sandbox backends, MCP server spawning, and browser tool
 - Path injection prevention per backend (Docker: `:`, `\0`, `\n`, `\r`; macOS: control chars, `(`, `)`, `\`, `"`)
 - Docker: `--cap-drop ALL`, `--security-opt no-new-privileges`, `--network none`
 
@@ -1051,7 +1056,7 @@ crates/
 - ShellTool SafePolicy: deny `rm -rf /`, `dd`, `mkfs`, fork bombs; ask for `sudo`, `git push --force`
 - Tool policies: allow/deny with deny-wins semantics, group support, provider-specific filtering
 - Path traversal prevention + symlink rejection in all file tools
-- SSRF protection in web_fetch: blocks private IPs (10/8, 172.16/12, 192.168/16, 169.254/16, IPv6 ULA/link-local)
+- SSRF protection in web_fetch and browser: blocks private IPs (10/8, 172.16/12, 192.168/16, 169.254/16, IPv6 ULA/link-local)
 
 ### Data Safety
 - UTF-8 safe truncation via `truncate_utf8()` across all tool outputs and email bodies

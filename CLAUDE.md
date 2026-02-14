@@ -45,7 +45,7 @@ Auth module (`crew-cli/src/auth/`): OAuth PKCE + device code for OpenAI, paste-t
 
 ### Tool System (`crew-agent/src/tools/`)
 
-All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Tools: shell, read_file, write_file, edit_file, glob, grep, list_dir, web_search, web_fetch, message, spawn, cron.
+All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Tools: shell, read_file, write_file, edit_file, glob, grep, list_dir, web_search, web_fetch, message, spawn, cron, browser (feature-gated).
 
 **Tool Policies** (`tools/policy.rs`): Allow/deny lists with deny-wins semantics, wildcard matching (`exec*`), and named groups (`group:fs`, `group:runtime`, `group:search`, `group:web`, `group:sessions`). Provider-specific policies via `tools.byProvider` in config.
 
@@ -104,5 +104,6 @@ SHA-256 hash-based change detection. Hot-reload for system prompt; restart-requi
 - `AtomicBool` for shutdown signaling
 - API keys from env vars via `api_key_env` or OAuth via `crew auth login`
 - Email channel feature-gated: `async-imap` + `lettre` + `mailparse`
+- Browser tool feature-gated: headless Chrome via CDP over `tokio-tungstenite` + `which`
 - `ShellTool` has `SafePolicy` that denies dangerous commands (rm -rf /, dd, mkfs, fork bomb)
-- `BLOCKED_ENV_VARS` shared across sandbox backends, MCP, and hooks (18 vars: LD_PRELOAD, DYLD_*, NODE_OPTIONS, etc.)
+- `BLOCKED_ENV_VARS` shared across sandbox backends, MCP, hooks, and browser tool (18 vars: LD_PRELOAD, DYLD_*, NODE_OPTIONS, etc.)
