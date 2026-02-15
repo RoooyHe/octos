@@ -761,7 +761,8 @@ The REST API server (feature: `api`) includes an embedded web UI:
 
 ```bash
 cargo install --path crates/crew-cli --features api
-crew serve
+crew serve                              # Binds to 127.0.0.1:8080
+crew serve --host 0.0.0.0 --port 3000  # Accept external connections
 # Open http://localhost:8080
 ```
 

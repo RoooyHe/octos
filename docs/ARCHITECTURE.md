@@ -26,6 +26,8 @@ crew-rs is a 6-crate Rust workspace (Edition 2024, rust-version 1.85.0) providin
 
 Shared types with no internal dependencies. Only depends on serde, chrono, uuid, eyre.
 
+`MessageRole` implements `as_str() -> &'static str` and `Display` for consistent string conversion across providers (system/user/assistant/tool).
+
 ### Task Model
 
 ```rust
@@ -369,15 +371,15 @@ pub struct HybridIndex {
 - Tokenization: lowercase, split on non-alphanumeric, filter tokens < 2 chars
 - IDF: `ln((N - df + 0.5) / (df + 0.5) + 1.0)`
 - Score: `IDF * (tf * (K1 + 1)) / (tf + K1 * (1 - B + B * dl/avg_dl))`
-- Normalized to [0, 1] range
+- Normalized to [0, 1] range (epsilon `1e-10` prevents NaN from near-zero max scores)
 
 **HNSW vector index** (via `hnsw_rs`):
-- Parameters: M=16, max_nodes=10000, ef_construction=16, ef=200, DistCosine
-- L2 normalization before insertion/search
+- Named constants: `HNSW_MAX_NB_CONNECTION=16`, `HNSW_CAPACITY=10_000`, `HNSW_EF_CONSTRUCTION=200`, `HNSW_MAX_LAYER=16`, `DistCosine`
+- L2 normalization before insertion/search; zero vectors rejected (returns `None`)
 - Cosine similarity = `1 - distance` (DistCosine returns 1-cos_sim)
 
 **Hybrid ranking** — fetches `limit * 4` candidates from each:
-- With vectors: `0.7 * vector_score + 0.3 * bm25_score`
+- Configurable weights via `with_weights(vector_weight, bm25_weight)` (defaults: 0.7 / 0.3)
 - Without vectors: BM25 only (graceful fallback)
 
 ---
@@ -396,7 +398,7 @@ pub struct Agent {
     system_prompt: RwLock<String>,
     config: AgentConfig,
     reporter: Arc<dyn ProgressReporter>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,       // Acquire/Release ordering
 }
 
 pub struct AgentConfig {
@@ -481,7 +483,7 @@ pub struct ToolResult {
 | **glob** | pattern, limit=100 | Rejects absolute paths and `..`, relative results |
 | **grep** | pattern, file_pattern?, limit=50, context=0, ignore_case=false | .gitignore-aware via `ignore::WalkBuilder`, regex with `(?i)` flag |
 | **list_dir** | path | Sorted, `[dir]`/`[file]` prefix |
-| **shell** | command, timeout_secs=120 | SafePolicy check, 50KB output truncation, sandbox-wrapped |
+| **shell** | command, timeout_secs=120 | SafePolicy check, 50KB output truncation, sandbox-wrapped, timeout clamped to [1, 600]s |
 | **web_search** | query, count=5 | Brave Search API (BRAVE_API_KEY) |
 | **web_fetch** | url, extract_mode="markdown", max_chars=50000 | SSRF protection, htmd HTML→markdown, 30s timeout |
 | **message** | content, channel?, chat_id? | Cross-channel messaging via OutboundMessage. **Gateway-only** |
@@ -510,7 +512,7 @@ pub struct ToolPolicy {
 pub enum Decision { Allow, Deny, Ask }
 ```
 
-**SafePolicy deny patterns**: `rm -rf /`, `rm -rf /*`, `dd if=`, `mkfs`, `:(){:|:&};:`, `chmod -R 777 /`
+**SafePolicy deny patterns**: `rm -rf /`, `rm -rf /*`, `dd if=`, `mkfs`, `:(){:|:&};:`, `chmod -R 777 /`. Commands are whitespace-normalized before matching to prevent evasion via extra spaces/tabs.
 
 **SafePolicy ask patterns**: `sudo`, `rm -rf`, `git push --force`, `git reset --hard`
 
@@ -566,7 +568,8 @@ JSON-RPC transport for Model Context Protocol servers. Two transport modes:
 1. Spawn server (command + args + env, filtering BLOCKED_ENV_VARS)
 2. Initialize: `protocolVersion: "2024-11-05"`
 3. Discover tools: `tools/list` RPC
-4. Register McpTool wrappers (30s timeout, 1MB max response)
+4. Validate input schemas (max depth 10, max size 64KB); reject tools with invalid schemas
+5. Register McpTool wrappers (30s timeout, 1MB max response)
 
 **McpTool execution**: `tools/call` with name + arguments. Extracts `content[].text` from response.
 
@@ -908,8 +911,9 @@ MAX_CHUNKS = 50 (DoS limit). UTF-8 safe boundary detection via `char_indices()`.
 
 JSONL persistence at `.crew/sessions/{key}.jsonl`.
 
-- **In-memory cache**: HashMap with disk sync on write
-- **Filenames**: Percent-encoded SessionKey for collision-free mapping
+- **In-memory cache**: LRU with disk sync on write
+- **Filenames**: Percent-encoded SessionKey, truncated to 183 chars with `_{hash:016X}` suffix on truncation to prevent collisions
+- **File size limit**: 10MB max (`MAX_SESSION_FILE_SIZE`); oversized files skipped on load
 - **Crash safety**: Atomic write-then-rename
 - **Forking**: `fork()` creates child session with `parent_key` tracking, copies last N messages
 
@@ -947,7 +951,7 @@ Periodic check of `HEARTBEAT.md` (default: 30 min interval). Sends content to ag
 | `clean` | Remove .redb files with dry-run support |
 | `completions` | Shell completion generation (bash/zsh/fish) |
 | `docs` | Generate tool + provider documentation |
-| `serve` | REST API server (feature: api) — axum on port 8080 |
+| `serve` | REST API server (feature: api) — axum on 127.0.0.1:8080 (`--host` to override) |
 
 ### Configuration
 
@@ -1086,7 +1090,7 @@ crates/
 │   ├── skills/ (cron, github, skill-creator, summarize, tmux, weather SKILL.md)
 │   └── tools/ (mod, policy, shell, read_file, write_file, edit_file, diff_edit,
 │               list_dir, glob_tool, grep_tool, web_search, web_fetch,
-│               message, spawn, browser)
+│               message, spawn, browser, ssrf)
 ├── crew-bus/src/
 │   ├── lib.rs, bus.rs, channel.rs, session.rs, coalesce.rs, media.rs
 │   ├── cli_channel.rs, telegram_channel.rs, discord_channel.rs
@@ -1120,17 +1124,21 @@ crates/
 - Docker: `--cap-drop ALL`, `--security-opt no-new-privileges`, `--network none`
 
 ### Tool Safety
-- ShellTool SafePolicy: deny `rm -rf /`, `dd`, `mkfs`, fork bombs; ask for `sudo`, `git push --force`
+- ShellTool SafePolicy: deny `rm -rf /`, `dd`, `mkfs`, fork bombs; ask for `sudo`, `git push --force`. Whitespace-normalized before matching. Timeout clamped to [1, 600]s.
 - Tool policies: allow/deny with deny-wins semantics, group support, provider-specific filtering
-- Path traversal prevention + symlink rejection in all file tools
-- SSRF protection in web_fetch and browser: blocks private IPs (10/8, 172.16/12, 192.168/16, 169.254/16, IPv6 ULA/link-local)
+- Tool argument size limit: 1MB per invocation (non-allocating `estimate_json_size` with escape char accounting)
+- Path traversal prevention + symlink-safe file I/O via `O_NOFOLLOW` (Unix) eliminating TOCTOU races
+- SSRF protection in shared `ssrf.rs` module: blocks private IPs (10/8, 172.16/12, 192.168/16, 169.254/16, IPv6 ULA/link-local, IPv4-mapped/compatible). Used by web_fetch and browser.
 - Browser: URL scheme allowlist (http/https only), 10s JS execution timeout, zombie process reaping, secure tempfiles for screenshots
+- MCP: input schema validation (max depth 10, max size 64KB) prevents malicious tool definitions
 
 ### Data Safety
 - Tool output sanitization: strips base64 data URIs and long hex strings (`sanitize.rs`)
 - UTF-8 safe truncation via `truncate_utf8()` across all tool outputs and email bodies
-- Session file collision prevention via percent-encoded filenames
+- Session file collision prevention via percent-encoded filenames with hash suffix on truncation
+- Session file size limit: 10MB max prevents OOM on corrupted files
 - Atomic write-then-rename for session persistence (crash safety)
+- API server binds to 127.0.0.1 by default (not 0.0.0.0)
 - Channel access control via `allowed_senders` lists
 - MCP response limit: 1MB per JSON-RPC line (DoS prevention)
 - Message coalescing: MAX_CHUNKS=50 DoS limit
@@ -1140,8 +1148,8 @@ crates/
 
 ## Testing
 
-253+ tests across all crates:
+316+ tests across all crates:
 - **Unit**: type serde round-trips, tool arg parsing, config validation, provider detection, tool policies, compaction, coalescing, BM25 scoring, L2 normalization, SSE parsing
 - **Integration**: CLI commands, file tools, session persistence, cron jobs, session forking, plugin loading
-- **Security**: sandbox path injection, env sanitization, SSRF blocking, symlink rejection, private IP detection, dedup overflow
+- **Security**: sandbox path injection, env sanitization, SSRF blocking, symlink rejection (O_NOFOLLOW), private IP detection, dedup overflow, tool argument size limits, session file size limits, circuit breaker threshold edge cases, MCP schema validation
 - **Channel**: allowed_senders, message parsing, dedup logic, email address extraction

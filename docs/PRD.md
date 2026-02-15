@@ -202,5 +202,15 @@ crew-rs is a Rust-native AI agent framework that provides both a coding automati
 - [x] `secrecy::SecretString` for all API keys
 - [x] `#![deny(unsafe_code)]` workspace-wide
 
+- [x] Comprehensive security audit (30 findings fixed, 316 tests)
+- [x] Symlink-safe file I/O (O_NOFOLLOW on Unix)
+- [x] Shared SSRF protection module
+- [x] MCP schema validation (depth/size limits)
+- [x] Tool argument size limits (1MB)
+- [x] Session file size limits (10MB)
+- [x] API default bind to 127.0.0.1
+- [x] Configurable hybrid search weights
+- [x] Shell timeout bounds (1-600s)
+
 ### Planned
 - [ ] DingTalk, QQ channels
