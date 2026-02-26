@@ -3,6 +3,7 @@ import type {
   OverviewResponse,
   ActionResponse,
   BulkActionResponse,
+  BridgeQrInfo,
   ProfileConfig,
   OtpSendResponse,
   OtpVerifyResponse,
@@ -109,6 +110,9 @@ export const api = {
 
   stopAll: () => request<BulkActionResponse>('/stop-all', { method: 'POST' }),
 
+  whatsappQr: (id: string) =>
+    request<BridgeQrInfo>(`/profiles/${id}/whatsapp/qr`),
+
   // User management (admin)
   listUsers: () => request<{ users: User[] }>('/users'),
 
@@ -169,6 +173,9 @@ export const myApi = {
 
   gatewayStatus: () =>
     authedRequest<{ running: boolean; pid: number | null }>('/my/profile/status'),
+
+  whatsappQr: () =>
+    authedRequest<BridgeQrInfo>('/my/profile/whatsapp/qr'),
 }
 
 // Helper to get SSE log URL with auth token (user's own profile)

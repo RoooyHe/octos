@@ -472,6 +472,23 @@ pub async fn my_gateway_logs(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+/// GET /api/my/profile/whatsapp/qr
+pub async fn my_whatsapp_qr(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(identity): axum::Extension<AuthIdentity>,
+) -> Result<Json<crate::process_manager::BridgeQrInfo>, StatusCode> {
+    let user_id = get_user_id(&identity)?;
+    let pm = state
+        .process_manager
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    pm.bridge_qr(&user_id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn get_user_id(identity: &AuthIdentity) -> Result<String, StatusCode> {

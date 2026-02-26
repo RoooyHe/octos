@@ -120,3 +120,10 @@ export interface MeResponse {
   user: User
   profile: ProfileResponse | null
 }
+
+export interface BridgeQrInfo {
+  qr: string | null
+  status: 'waiting' | 'connected' | 'disconnected' | 'logged_out'
+  ws_port: number
+  http_port: number
+}

@@ -10,6 +10,7 @@ mod router;
 mod sse;
 mod static_files;
 pub mod user_admin;
+pub mod webhook_proxy;
 
 pub use metrics::init_metrics;
 pub use router::build_router;

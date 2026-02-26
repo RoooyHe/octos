@@ -16,6 +16,7 @@ use super::handlers;
 use super::metrics;
 use super::static_files;
 use super::user_admin;
+use super::webhook_proxy;
 use crate::user_store::UserRole;
 
 /// Authentication identity extracted by the auth middleware.
@@ -77,6 +78,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(auth_handlers::my_gateway_status),
         )
         .route("/api/my/profile/logs", get(auth_handlers::my_gateway_logs))
+        .route(
+            "/api/my/profile/whatsapp/qr",
+            get(auth_handlers::my_whatsapp_qr),
+        )
         .route("/api/auth/me", get(auth_handlers::me));
 
     // Admin API routes (admin auth only, 1MB body limit)
@@ -99,6 +104,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(admin::gateway_status),
         )
         .route("/api/admin/profiles/{id}/logs", get(admin::gateway_logs))
+        .route(
+            "/api/admin/profiles/{id}/whatsapp/qr",
+            get(admin::whatsapp_qr),
+        )
         .route("/api/admin/start-all", post(admin::start_all))
         .route("/api/admin/stop-all", post(admin::stop_all))
         // User management
@@ -129,10 +138,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         my_api.merge(chat_api).merge(admin_api)
     };
 
-    // Unauthenticated routes (metrics + static files + auth endpoints)
+    // Webhook proxy routes (unauthenticated — Feishu/Twilio servers can't authenticate)
+    let webhook_routes = Router::new()
+        .route(
+            "/webhook/feishu/{profile_id}",
+            post(webhook_proxy::feishu_webhook_proxy),
+        )
+        .route(
+            "/webhook/twilio/{profile_id}",
+            post(webhook_proxy::twilio_webhook_proxy),
+        );
+
+    // Unauthenticated routes (metrics + static files + auth endpoints + webhook proxy)
     let public = Router::new()
         .route("/metrics", get(metrics::metrics_handler))
-        .merge(auth_api);
+        .merge(auth_api)
+        .merge(webhook_routes);
 
     public
         .merge(protected)

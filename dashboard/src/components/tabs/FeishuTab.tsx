@@ -3,9 +3,10 @@ import type { ProfileConfig } from '../../types'
 interface Props {
   config: ProfileConfig
   onChange: (config: ProfileConfig) => void
+  profileId?: string
 }
 
-export default function FeishuTab({ config, onChange }: Props) {
+export default function FeishuTab({ config, onChange, profileId }: Props) {
   const channel = config.channels.find((c) => c.type === 'feishu')
   const enabled = !!channel
 
@@ -58,7 +59,7 @@ export default function FeishuTab({ config, onChange }: Props) {
           <li>Subscribe to <code className="bg-gray-800 px-1 rounded">im.message.receive_v1</code> event</li>
           <li>Add permissions: <code className="bg-gray-800 px-1 rounded">im:message</code>, <code className="bg-gray-800 px-1 rounded">im:message:send_as_bot</code></li>
         </ol>
-        <p className="text-gray-600"><strong>WebSocket mode</strong> (recommended): No public URL needed, the bot connects outbound. <strong>Webhook mode</strong>: Requires a public URL (e.g., via ngrok). Each profile needs a different webhook port.</p>
+        <p className="text-gray-600"><strong>WebSocket mode</strong> (recommended): No public URL needed, the bot connects outbound. <strong>Webhook mode</strong>: Uses the proxy URL below (one ngrok tunnel for all profiles).</p>
       </div>
 
       <label className="flex items-center gap-2 cursor-pointer">
@@ -124,7 +125,7 @@ export default function FeishuTab({ config, onChange }: Props) {
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Mode</label>
             <select
-              value={(channel as any)?.mode || 'webhook'}
+              value={(channel as any)?.mode || 'websocket'}
               onChange={(e) => updateField('mode', e.target.value)}
               className="input text-xs"
             >
@@ -136,35 +137,65 @@ export default function FeishuTab({ config, onChange }: Props) {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Region</label>
-              <select
-                value={(channel as any)?.region || 'feishu'}
-                onChange={(e) => updateField('region', e.target.value)}
-                className="input text-xs"
-              >
-                <option value="feishu">Feishu (China)</option>
-                <option value="lark">Lark (International)</option>
-              </select>
-              <p className="text-[10px] text-gray-600 mt-1">
-                Determines API endpoint: feishu.cn or larksuite.com
-              </p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Webhook Port</label>
-              <input
-                type="number"
-                value={(channel as any)?.webhook_port || ''}
-                onChange={(e) => updateField('webhook_port', e.target.value ? Number(e.target.value) as any : '')}
-                placeholder="9321"
-                className="input text-xs"
-              />
-              <p className="text-[10px] text-gray-600 mt-1">
-                Only for webhook mode. Use different ports per profile.
-              </p>
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1.5">Region</label>
+            <select
+              value={(channel as any)?.region || 'feishu'}
+              onChange={(e) => updateField('region', e.target.value)}
+              className="input text-xs"
+            >
+              <option value="feishu">Feishu (China)</option>
+              <option value="lark">Lark (International)</option>
+            </select>
+            <p className="text-[10px] text-gray-600 mt-1">
+              Determines API endpoint: feishu.cn or larksuite.com
+            </p>
           </div>
+
+          {((channel as any)?.mode || 'websocket') === 'websocket' && (
+            <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 text-xs text-green-400">
+              WebSocket mode: The gateway connects outbound to Feishu servers. No public URL or port configuration needed. Each profile connects independently.
+            </div>
+          )}
+
+          {(channel as any)?.mode === 'webhook' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">Webhook Port</label>
+                <input
+                  type="number"
+                  value={(channel as any)?.webhook_port || ''}
+                  onChange={(e) => updateField('webhook_port', e.target.value ? Number(e.target.value) as any : '')}
+                  placeholder="auto"
+                  className="input text-xs"
+                />
+                <p className="text-[10px] text-gray-600 mt-1">
+                  Leave blank for auto-assignment by the server.
+                </p>
+              </div>
+
+              {profileId && (
+                <div className="bg-surface-dark/50 rounded-lg p-3 border border-gray-700/50">
+                  <label className="block text-sm font-medium text-gray-300 mb-1.5">Webhook URL</label>
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs text-accent bg-gray-800 px-2 py-1 rounded flex-1 break-all select-all">
+                      {window.location.origin}/webhook/feishu/{profileId}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(`${window.location.origin}/webhook/feishu/${profileId}`)}
+                      className="text-xs text-gray-400 hover:text-white px-2 py-1 rounded border border-gray-600 hover:border-gray-500"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-600 mt-1">
+                    Paste this URL into the Feishu/Lark app's Event Subscription settings. The server will proxy events to this profile's gateway.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
     </div>

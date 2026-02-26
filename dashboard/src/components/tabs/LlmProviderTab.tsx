@@ -8,7 +8,7 @@ const PROVIDER_DEFAULTS: Record<string, { env: string; model: string }> = {
   openrouter: { env: 'OPENROUTER_API_KEY', model: 'anthropic/claude-sonnet-4-20250514' },
   deepseek: { env: 'DEEPSEEK_API_KEY', model: 'deepseek-chat' },
   groq: { env: 'GROQ_API_KEY', model: 'llama-3.3-70b-versatile' },
-  moonshot: { env: 'MOONSHOT_API_KEY', model: 'kimi-k2.5' },
+  moonshot: { env: 'MOONSHOT_API_KEY', model: 'kimi-k2.5' },  // API model ID, not display name
   dashscope: { env: 'DASHSCOPE_API_KEY', model: 'qwen-max' },
   minimax: { env: 'MINIMAX_API_KEY', model: 'MiniMax-Text-01' },
   zhipu: { env: 'ZHIPU_API_KEY', model: 'glm-4-plus' },

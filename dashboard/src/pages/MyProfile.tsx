@@ -264,8 +264,8 @@ export default function MyProfile() {
           {activeTab === 'search' && <SearchApiTab config={config} onChange={setConfig} />}
           {activeTab === 'ppt' && <PptConfigTab config={config} onChange={setConfig} />}
           {activeTab === 'telegram' && <TelegramTab config={config} onChange={setConfig} />}
-          {activeTab === 'whatsapp' && <WhatsAppTab config={config} onChange={setConfig} />}
-          {activeTab === 'feishu' && <FeishuTab config={config} onChange={setConfig} />}
+          {activeTab === 'whatsapp' && <WhatsAppTab config={config} onChange={setConfig} isRunning={isRunning} />}
+          {activeTab === 'feishu' && <FeishuTab config={config} onChange={setConfig} profileId={user?.id} />}
           {activeTab === 'gateway' && <GatewayTab config={config} onChange={setConfig} />}
         </div>
 

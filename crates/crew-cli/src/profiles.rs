@@ -89,6 +89,16 @@ pub enum ChannelCredentials {
         app_id_env: String,
         #[serde(default = "default_feishu_secret_env")]
         app_secret_env: String,
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        region: String,
+        #[serde(default)]
+        webhook_port: Option<u16>,
+        #[serde(default)]
+        verification_token_env: String,
+        #[serde(default)]
+        encrypt_key_env: String,
     },
     Email {
         #[serde(default)]
@@ -263,7 +273,16 @@ impl ProfileStore {
     }
 
     /// Generate a crew-rs config JSON for a profile's gateway process.
-    pub fn generate_config(&self, profile: &UserProfile) -> Result<PathBuf> {
+    ///
+    /// `bridge_url_override`: if provided, replaces the WhatsApp bridge_url in the
+    /// generated config. Used by managed bridges where the ProcessManager assigns
+    /// a dynamic port.
+    pub fn generate_config(
+        &self,
+        profile: &UserProfile,
+        bridge_url_override: Option<&str>,
+        feishu_webhook_port_override: Option<u16>,
+    ) -> Result<PathBuf> {
         let config_dir = self.profiles_dir.join(&profile.id);
         std::fs::create_dir_all(&config_dir)?;
         let config_path = config_dir.join("config.json");
@@ -272,7 +291,22 @@ impl ProfileStore {
             .config
             .channels
             .iter()
-            .map(channel_to_entry)
+            .map(|ch| {
+                let mut entry = channel_to_entry(ch);
+                // Override WhatsApp bridge_url if managed
+                if let ChannelCredentials::WhatsApp { .. } = ch {
+                    if let Some(url) = bridge_url_override {
+                        entry["settings"]["bridge_url"] = serde_json::json!(url);
+                    }
+                }
+                // Override Feishu webhook_port if auto-assigned
+                if let ChannelCredentials::Feishu { .. } = ch {
+                    if let Some(port) = feishu_webhook_port_override {
+                        entry["settings"]["webhook_port"] = serde_json::json!(port);
+                    }
+                }
+                entry
+            })
             .collect();
 
         let mut gateway = serde_json::json!({
@@ -420,10 +454,36 @@ fn channel_to_entry(cred: &ChannelCredentials) -> serde_json::Value {
         ChannelCredentials::Feishu {
             app_id_env,
             app_secret_env,
-        } => serde_json::json!({
-            "type": "feishu",
-            "settings": { "app_id_env": app_id_env, "app_secret_env": app_secret_env }
-        }),
+            mode,
+            region,
+            webhook_port,
+            verification_token_env,
+            encrypt_key_env,
+        } => {
+            let mut settings = serde_json::json!({
+                "app_id_env": app_id_env,
+                "app_secret_env": app_secret_env,
+            });
+            if !mode.is_empty() {
+                settings["mode"] = serde_json::json!(mode);
+            }
+            if !region.is_empty() {
+                settings["region"] = serde_json::json!(region);
+            }
+            if let Some(port) = webhook_port {
+                settings["webhook_port"] = serde_json::json!(port);
+            }
+            if !verification_token_env.is_empty() {
+                settings["verification_token_env"] = serde_json::json!(verification_token_env);
+            }
+            if !encrypt_key_env.is_empty() {
+                settings["encrypt_key_env"] = serde_json::json!(encrypt_key_env);
+            }
+            serde_json::json!({
+                "type": "feishu",
+                "settings": settings
+            })
+        }
         ChannelCredentials::Email {
             imap_host,
             imap_port,
@@ -443,6 +503,21 @@ fn channel_to_entry(cred: &ChannelCredentials) -> serde_json::Value {
             }
         }),
     }
+}
+
+/// Check if a profile has a Feishu channel and return its webhook port configuration.
+///
+/// Returns:
+/// - `Some(Some(port))` — Feishu channel exists with explicit webhook port
+/// - `Some(None)` — Feishu channel exists but needs an auto-assigned port
+/// - `None` — no Feishu channel
+pub fn feishu_webhook_port(profile: &UserProfile) -> Option<Option<u16>> {
+    for ch in &profile.config.channels {
+        if let ChannelCredentials::Feishu { webhook_port, .. } = ch {
+            return Some(*webhook_port);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -540,7 +615,7 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let config_path = store.generate_config(&profile).unwrap();
+        let config_path = store.generate_config(&profile, None, None).unwrap();
         assert!(config_path.exists());
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -575,13 +650,59 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let config_path = store.generate_config(&profile).unwrap();
+        let config_path = store.generate_config(&profile, None, None).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         // "moonshot" should be mapped to "openai" with Moonshot base_url
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["base_url"], "https://api.moonshot.ai/v1");
         assert_eq!(json["model"], "kimi-k2.5");
+    }
+
+    #[test]
+    fn test_generate_config_bridge_url_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::open(dir.path()).unwrap();
+
+        let profile = UserProfile {
+            id: "wa-test".into(),
+            name: "WA Test".into(),
+            enabled: true,
+            data_dir: None,
+            config: ProfileConfig {
+                provider: Some("anthropic".into()),
+                model: Some("claude-sonnet-4-20250514".into()),
+                base_url: None,
+                api_key_env: None,
+                channels: vec![ChannelCredentials::WhatsApp {
+                    bridge_url: "ws://localhost:3001".into(),
+                }],
+                gateway: GatewaySettings::default(),
+                env_vars: Default::default(),
+            },
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // Without override: uses original bridge_url
+        let config_path = store.generate_config(&profile, None, None).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            json["gateway"]["channels"][0]["settings"]["bridge_url"],
+            "ws://localhost:3001"
+        );
+
+        // With override: uses managed bridge URL
+        let config_path = store
+            .generate_config(&profile, Some("ws://localhost:3105"), None)
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            json["gateway"]["channels"][0]["settings"]["bridge_url"],
+            "ws://localhost:3105"
+        );
     }
 
     #[test]
@@ -681,6 +802,11 @@ mod tests {
             ChannelCredentials::Feishu {
                 app_id_env: "FID".into(),
                 app_secret_env: "FSE".into(),
+                mode: String::new(),
+                region: String::new(),
+                webhook_port: None,
+                verification_token_env: String::new(),
+                encrypt_key_env: String::new(),
             },
             ChannelCredentials::Email {
                 imap_host: "imap.test.com".into(),

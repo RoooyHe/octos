@@ -448,6 +448,24 @@ pub async fn gateway_logs(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+/// GET /api/admin/profiles/:id/whatsapp/qr
+pub async fn whatsapp_qr(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::process_manager::BridgeQrInfo>, (StatusCode, String)> {
+    let pm = state.process_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "admin not configured".into(),
+    ))?;
+
+    let info = pm.bridge_qr(&id).await.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("no managed WhatsApp bridge for '{id}'"),
+    ))?;
+
+    Ok(Json(info))
+}
+
 /// POST /api/admin/start-all
 pub async fn start_all(
     State(state): State<Arc<AppState>>,

@@ -134,9 +134,11 @@ impl ServeCommand {
             crate::profiles::ProfileStore::open(&data_dir)
                 .wrap_err("failed to open profile store")?,
         );
-        let process_manager = Arc::new(crate::process_manager::ProcessManager::new(
-            profile_store.clone(),
-        ));
+        let bridge_js_path = data_dir.join("whatsapp-bridge").join("bridge.js");
+        let process_manager = Arc::new(
+            crate::process_manager::ProcessManager::new(profile_store.clone())
+                .with_bridge_js(bridge_js_path),
+        );
 
         // Initialize user store and auth manager for multi-user support
         let user_store = Arc::new(

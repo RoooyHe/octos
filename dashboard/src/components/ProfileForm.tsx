@@ -146,7 +146,7 @@ export default function ProfileForm({
       {activeTab === 'ppt' && <PptConfigTab config={config} onChange={setConfig} />}
       {activeTab === 'telegram' && <TelegramTab config={config} onChange={setConfig} />}
       {activeTab === 'whatsapp' && <WhatsAppTab config={config} onChange={setConfig} />}
-      {activeTab === 'feishu' && <FeishuTab config={config} onChange={setConfig} />}
+      {activeTab === 'feishu' && <FeishuTab config={config} onChange={setConfig} profileId={id} />}
       {activeTab === 'gateway' && <GatewayTab config={config} onChange={setConfig} />}
 
       {/* Env Vars Tab (raw key-value editor for admin) */}
