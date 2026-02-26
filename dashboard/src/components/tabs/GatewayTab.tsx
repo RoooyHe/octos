@@ -15,6 +15,11 @@ export default function GatewayTab({ config, onChange }: Props) {
 
   return (
     <div className="space-y-4">
+      <div className="text-xs text-gray-400 space-y-1.5 bg-surface-dark/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="font-medium text-gray-300">Gateway Settings</p>
+        <p>Configure the agent's behavior for this gateway instance. These settings control conversation memory, tool usage limits, and the system prompt that shapes the agent's personality.</p>
+      </div>
+
       <div>
         <label className="block text-sm font-medium text-gray-300 mb-1.5">Max History</label>
         <input

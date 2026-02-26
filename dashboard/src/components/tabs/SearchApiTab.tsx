@@ -24,10 +24,15 @@ export default function SearchApiTab({ config, onChange }: Props) {
 
   return (
     <div className="space-y-4">
-      <p className="text-xs text-gray-500">
-        Configure API keys for web search providers. The agent will use whichever is available
-        (DuckDuckGo is used by default with no API key needed).
-      </p>
+      <div className="text-xs text-gray-400 space-y-1.5 bg-surface-dark/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="font-medium text-gray-300">Web Search APIs</p>
+        <p>Configure API keys for web search providers used by the <code className="bg-gray-800 px-1 rounded">web_search</code> tool. DuckDuckGo is used by default with no API key. Adding a key here enables higher-quality results.</p>
+        <ul className="list-disc list-inside space-y-0.5 text-gray-500">
+          <li><strong>Perplexity</strong> &mdash; <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noopener" className="text-accent hover:underline">Get API key</a> (AI-powered search)</li>
+          <li><strong>Brave Search</strong> &mdash; <a href="https://brave.com/search/api/" target="_blank" rel="noopener" className="text-accent hover:underline">Get API key</a> (independent web index)</li>
+          <li><strong>You.com</strong> &mdash; <a href="https://you.com/search?q=api" target="_blank" rel="noopener" className="text-accent hover:underline">Get API key</a></li>
+        </ul>
+      </div>
 
       {SEARCH_KEYS.map(({ key, label, placeholder }) => (
         <div key={key}>

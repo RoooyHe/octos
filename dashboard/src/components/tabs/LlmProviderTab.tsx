@@ -31,7 +31,15 @@ export default function LlmProviderTab({ config, onChange }: Props) {
   return (
     <div className="space-y-4">
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-400">
-        LLM provider is required to start the gateway.
+        LLM provider is required to start the gateway. Select a provider, choose a model, and paste your API key below.
+      </div>
+
+      <div className="text-xs text-gray-400 space-y-1.5 bg-surface-dark/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="font-medium text-gray-300">Supported Providers</p>
+        <p>
+          <strong>Anthropic</strong> (Claude), <strong>OpenAI</strong> (GPT-4o), <strong>Gemini</strong> (Google), <strong>OpenRouter</strong> (multi-model), <strong>DeepSeek</strong>, <strong>Groq</strong> (fast inference), <strong>Moonshot</strong> (Kimi), <strong>DashScope</strong> (Qwen), <strong>MiniMax</strong>, <strong>Zhipu</strong> (GLM), <strong>Ollama</strong> (local, no key needed), <strong>vLLM</strong> (self-hosted).
+        </p>
+        <p className="text-gray-600">Get your API key from the provider's dashboard. The key is stored securely and passed as an environment variable to the gateway process.</p>
       </div>
 
       <Field label="Provider">

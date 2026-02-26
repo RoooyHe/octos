@@ -18,10 +18,10 @@ export default function PptConfigTab({ config, onChange }: Props) {
 
   return (
     <div className="space-y-4">
-      <p className="text-xs text-gray-500">
-        Configure settings for PPT/presentation generation. The agent uses these
-        when creating slide decks.
-      </p>
+      <div className="text-xs text-gray-400 space-y-1.5 bg-surface-dark/50 rounded-lg p-3 border border-gray-700/50">
+        <p className="font-medium text-gray-300">PPT Generation</p>
+        <p>Configure settings for PowerPoint/presentation generation. The agent uses these when creating slide decks via the <code className="bg-gray-800 px-1 rounded">pptx</code> skill. Set a template directory to provide custom .pptx templates, and a default theme for consistent branding.</p>
+      </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-300 mb-1.5">

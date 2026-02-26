@@ -63,6 +63,8 @@ pub enum ChannelCredentials {
     Telegram {
         #[serde(default = "default_telegram_env")]
         token_env: String,
+        #[serde(default)]
+        allowed_senders: String,
     },
     Discord {
         #[serde(default = "default_discord_env")]
@@ -351,10 +353,18 @@ fn validate_profile_id(id: &str) -> Result<()> {
 /// Convert a `ChannelCredentials` to a crew-rs `ChannelEntry` JSON value.
 fn channel_to_entry(cred: &ChannelCredentials) -> serde_json::Value {
     match cred {
-        ChannelCredentials::Telegram { token_env } => serde_json::json!({
-            "type": "telegram",
-            "settings": { "token_env": token_env }
-        }),
+        ChannelCredentials::Telegram { token_env, allowed_senders } => {
+            let senders: Vec<&str> = allowed_senders
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            serde_json::json!({
+                "type": "telegram",
+                "allowed_senders": senders,
+                "settings": { "token_env": token_env }
+            })
+        }
         ChannelCredentials::Discord { token_env } => serde_json::json!({
             "type": "discord",
             "settings": { "token_env": token_env }
@@ -431,6 +441,7 @@ mod tests {
                 api_key_env: Some("ANTHROPIC_API_KEY".into()),
                 channels: vec![ChannelCredentials::Telegram {
                     token_env: "TG_TOKEN".into(),
+                    allowed_senders: String::new(),
                 }],
                 gateway: GatewaySettings {
                     max_history: Some(50),
@@ -472,6 +483,7 @@ mod tests {
                 channels: vec![
                     ChannelCredentials::Telegram {
                         token_env: "TG".into(),
+                        allowed_senders: String::new(),
                     },
                     ChannelCredentials::Slack {
                         bot_token_env: "SB".into(),
@@ -583,6 +595,7 @@ mod tests {
         let channels = vec![
             ChannelCredentials::Telegram {
                 token_env: "TG".into(),
+                allowed_senders: String::new(),
             },
             ChannelCredentials::Discord {
                 token_env: "DC".into(),
