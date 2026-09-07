@@ -41381,6 +41381,7 @@ mod obs_malformed_exhausted_48b {
             Some(("runtime_error", message.as_str())),
             None,
             None,
+            None,
         )
         .await;
         // Drain the ws notifications so the runtime doesn't complain.
