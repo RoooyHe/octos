@@ -445,7 +445,20 @@ const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] = &[
 ];
 type WsSink = futures::stream::SplitSink<WebSocket, WsMessage>;
 type SharedActiveTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ActiveTurn>>>;
-type SharedConnectionTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, TurnId>>>;
+#[derive(Clone)]
+struct ConnectionTurn {
+    turn_id: TurnId,
+    // Pin the original dispatch even after ActiveTurns advances to a reused ID.
+    state: Arc<TokioMutex<TurnState>>,
+}
+
+impl ConnectionTurn {
+    fn matches(&self, active: &ActiveTurn) -> bool {
+        self.turn_id == active.turn_id && Arc::ptr_eq(&self.state, &active.state)
+    }
+}
+
+type SharedConnectionTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ConnectionTurn>>>;
 type DynamicProfileRuntimeMap =
     std::sync::RwLock<HashMap<String, Arc<crate::runtime::ProfileRuntime>>>;
 
@@ -7433,11 +7446,11 @@ async fn drain_connection_turns_for_shutdown(
         let mut live: Vec<SessionKey> = Vec::new();
         {
             let active = active_turns.lock().await;
-            for (session_id, turn_id) in &owned {
+            for (session_id, registered) in &owned {
                 let Some(turn) = active.get(session_id) else {
                     continue;
                 };
-                if &turn.turn_id != turn_id {
+                if !registered.matches(turn) {
                     continue;
                 }
                 // Terminal entries stay registered until cleanup — the turn
@@ -14205,6 +14218,16 @@ async fn raw_peer_prepare(
         let member = match member.and_then(|inner| inner) {
             Ok(member) => member,
             Err(err) => {
+                // Outer-loop #4 (§4.2 fleet rollback): every ALREADY-staged
+                // member holds a first-turn slot from `stage_peer` — release
+                // them before the dirs go away, or the flocks leak until serve
+                // exit (a 2-slot pool is exhausted by the second leak).
+                for (staged_slug, staged_dir) in &staged {
+                    release_staged_peer_build_cache_slot(
+                        staged_dir.parent().unwrap_or(peers_root.as_path()),
+                        staged_slug,
+                    );
+                }
                 cleanup_staged_peers(&workspace_root, &staged).await;
                 return Err(err);
             }
@@ -15152,6 +15175,81 @@ mod peer_awaiting_wake_tests {
             "a retried park never stacks a redundant wake",
         );
     }
+}
+
+fn build_cache_turn_owner(
+    session: &SessionKey,
+    turn: &TurnId,
+    state: &TokioMutex<TurnState>,
+) -> BuildCacheTurnOwner {
+    BuildCacheTurnOwner {
+        session: session.clone(),
+        turn: turn.clone(),
+        generation: std::ptr::from_ref(state) as usize,
+    }
+}
+
+/// Exact turn ownership also applies when a terminal has no resolved peers root.
+fn release_peer_build_cache_slot(
+    peers_root: Option<&std::path::Path>,
+    session_id: &SessionKey,
+    turn_id: &TurnId,
+    turn_state: &TokioMutex<TurnState>,
+    outcome: crate::build_cache::pool::SlotOutcome,
+) {
+    let Some(slug) = session_id
+        .topic()
+        .and_then(|topic| topic.strip_prefix("peer-"))
+    else {
+        return;
+    };
+    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
+    if let Some(root) = peers_root {
+        build_cache_slot_registry().release_owned(
+            &build_cache_slot_registry_key(root, slug),
+            &owner,
+            outcome,
+        );
+    } else {
+        build_cache_slot_registry().release_for_slug(slug, &owner, outcome);
+    }
+}
+
+/// Captured before the task is spawned, so an abort before its first poll also
+/// releases the dispatch reservation. The strong state reference pins the
+/// generation address until this guard drops; a stale guard cannot close a
+/// replacement even when its client-supplied session and turn IDs are reused.
+struct BuildCacheTurnReservation(BuildCacheTurnOwner, Arc<TokioMutex<TurnState>>);
+impl Drop for BuildCacheTurnReservation {
+    fn drop(&mut self) {
+        release_peer_build_cache_slot(
+            None,
+            &self.0.session,
+            &self.0.turn,
+            &self.1,
+            crate::build_cache::pool::SlotOutcome::Cancelled,
+        );
+    }
+}
+
+fn reserve_peer_build_cache_turn(
+    state: &AppState,
+    session_id: &SessionKey,
+    turn_id: &TurnId,
+    turn_state: &Arc<TokioMutex<TurnState>>,
+    routed_profile: Option<&str>,
+) -> Result<BuildCacheTurnReservation, RpcError> {
+    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
+    if let Some(slug) = session_id
+        .topic()
+        .and_then(|topic| topic.strip_prefix("peer-"))
+        && let Some(runtime) =
+            resolve_session_profile_runtime(state, session_id.profile_id().or(routed_profile))
+    {
+        let key = build_cache_slot_registry_key(&runtime.data_dir.join("peers"), slug);
+        build_cache_slot_registry().reserve_staged(&key, &owner)?;
+    }
+    Ok(BuildCacheTurnReservation(owner, turn_state.clone()))
 }
 
 /// #1801 v2: peer sessions leave a durable result on the blackboard — a
@@ -16383,6 +16481,12 @@ fn build_peer_close_callback(
         if let Some(wire) = peer_wire_registry().resolve(&key) {
             evict_peer_wire_session(&wire);
         }
+        // Outer-loop #4 (§4.2): safety-net slot release (Retired). The
+        // PRIMARY release is the per-turn terminal; a peer whose last turn
+        // already finished finds nothing here (registry take → None), but a
+        // peer closed WITH a turn in flight — or one staged and never booted —
+        // would otherwise hold its flock until serve exit. Idempotent.
+        release_staged_peer_build_cache_slot(&peers_root, &slug);
         // Close succeeded (marker durable, queue cleared, wire evicted). Emit
         // the durable `peer/closed` so the client tears down the peer pane it
         // opened. Mirrors the `peer/staged` emit — routing keys off the
@@ -21653,7 +21757,7 @@ async fn handle_review_start(
                 ActiveTurn {
                     turn_id: turn_id.clone(),
                     profile_id: profile_for_stamp.clone(),
-                    state: turn_state,
+                    state: turn_state.clone(),
                     interrupt_tx,
                     // Review turns are non-steerable (codex
                     // `ActiveTurnNotSteerable` for the Review turn kind).
@@ -21674,10 +21778,13 @@ async fn handle_review_start(
         return;
     }
 
-    connection_turns
-        .lock()
-        .await
-        .insert(session_id.clone(), turn_id.clone());
+    connection_turns.lock().await.insert(
+        session_id.clone(),
+        ConnectionTurn {
+            turn_id: turn_id.clone(),
+            state: turn_state.clone(),
+        },
+    );
     if send_rpc_result(
         ws,
         id,
@@ -22238,7 +22345,21 @@ async fn handle_turn_start_with_accept(
                     .active_goal_id(&session_id, &goal_profile)
                     .map(|goal_id| (goal_profile, goal_id))
             });
+    let cache_reservation = match reserve_peer_build_cache_turn(
+        state,
+        &session_id,
+        &turn_id,
+        &turn_state,
+        resolved_profile_id.as_deref(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            let _ = send_rpc_error(ws, Some(id), error);
+            return false;
+        }
+    };
     let handle = tokio::spawn(async move {
+        let _cache_reservation = cache_reservation;
         if start_rx.await.is_err() {
             return;
         }
@@ -22334,10 +22455,13 @@ async fn handle_turn_start_with_accept(
         return false;
     }
 
-    connection_turns
-        .lock()
-        .await
-        .insert(session_id.clone(), turn_id.clone());
+    connection_turns.lock().await.insert(
+        session_id.clone(),
+        ConnectionTurn {
+            turn_id: turn_id.clone(),
+            state: turn_state.clone(),
+        },
+    );
     // Lifecycle reply: if the client cannot receive the accept, abort the
     // freshly-inserted turn — running an unaccepted turn would be a leak.
     if send_rpc_result(ws, id, accept_result).is_err() {
@@ -22345,16 +22469,15 @@ async fn handle_turn_start_with_accept(
         let mut active = active_turns.lock().await;
         if active
             .get(&session_id)
-            .is_some_and(|entry| entry.turn_id == turn_id)
+            .is_some_and(|entry| entry.turn_id == turn_id && Arc::ptr_eq(&entry.state, &turn_state))
         {
             active.remove(&session_id);
         }
         drop(active);
         let mut connection = connection_turns.lock().await;
-        if connection
-            .get(&session_id)
-            .is_some_and(|registered| *registered == turn_id)
-        {
+        if connection.get(&session_id).is_some_and(|registered| {
+            registered.turn_id == turn_id && Arc::ptr_eq(&registered.state, &turn_state)
+        }) {
             connection.remove(&session_id);
         }
         return false;
@@ -22846,7 +22969,21 @@ async fn maybe_spawn_appui_master_continuation_runner(
             if kind == crate::autonomy::agent_orchestrator::PEER_SEND_INPUT_EXTERNAL_KIND
                 || kind == crate::autonomy::agent_orchestrator::STEER_EXTERNAL_KIND
     );
+    let cache_reservation = match reserve_peer_build_cache_turn(
+        state,
+        &session_id,
+        &turn_id,
+        &turn_state,
+        routed_profile_id.as_deref(),
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            tracing::warn!(%error.message, "build-cache continuation admission refused");
+            return false;
+        }
+    };
     let handle = tokio::spawn(async move {
+        let _cache_reservation = cache_reservation;
         if start_rx.await.is_err() {
             return;
         }
@@ -23000,7 +23137,7 @@ async fn maybe_spawn_appui_master_continuation_runner(
         ActiveTurn {
             turn_id: turn_id.clone(),
             profile_id: profile_id.clone(),
-            state: turn_state,
+            state: turn_state.clone(),
             interrupt_tx,
             steer: Some(steer_buffer),
             abort: handle.abort_handle(),
@@ -23008,10 +23145,13 @@ async fn maybe_spawn_appui_master_continuation_runner(
     );
     drop(active);
 
-    connection_turns
-        .lock()
-        .await
-        .insert(session_id, turn_id.clone());
+    connection_turns.lock().await.insert(
+        session_id,
+        ConnectionTurn {
+            turn_id: turn_id.clone(),
+            state: turn_state.clone(),
+        },
+    );
     let _ = start_tx.send(());
     true
 }
@@ -23481,9 +23621,9 @@ pub(crate) fn spawn_global_master_continuation_drain(state: Arc<AppState>) {
                 if !conns.is_empty() {
                     let mut active = active_turns.lock().await;
                     let mut finished: Vec<SessionKey> = Vec::new();
-                    for (session, turn_id) in conns.iter() {
+                    for (session, registered) in conns.iter() {
                         match active.get(session) {
-                            Some(existing) if existing.turn_id == *turn_id => {
+                            Some(existing) if registered.matches(existing) => {
                                 if matches!(&*existing.state.lock().await, TurnState::Terminal(_)) {
                                     finished.push(session.clone());
                                 }
@@ -23495,7 +23635,10 @@ pub(crate) fn spawn_global_master_continuation_drain(state: Arc<AppState>) {
                     }
                     for session in finished {
                         if let Some(existing) = active.get(&session) {
-                            if conns.get(&session) == Some(&existing.turn_id) {
+                            if conns
+                                .get(&session)
+                                .is_some_and(|registered| registered.matches(existing))
+                            {
                                 active.remove(&session);
                             }
                         }
@@ -29455,6 +29598,8 @@ async fn run_m9_fixture_turn(
                     // M9 fixtures replay canned events; no live LLM token data.
                     None,
                     None,
+                    None,
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
             }
@@ -29470,6 +29615,8 @@ async fn run_m9_fixture_turn(
                 Some((code, message.as_str())),
                 None,
                 None,
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
         }
@@ -29503,6 +29650,8 @@ async fn run_m9_fixture_turn(
                 )),
                 None,
                 None,
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
         }
@@ -30317,6 +30466,8 @@ async fn run_native_code_review_turn(
                     Some(("runtime_unavailable", message.as_str())),
                     None,
                     None,
+                    None,
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -30334,6 +30485,8 @@ async fn run_native_code_review_turn(
                     Some(("runtime_unavailable", message.as_str())),
                     None,
                     None,
+                    None,
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -30357,6 +30510,8 @@ async fn run_native_code_review_turn(
                 Some(("permission_denied", message.as_str())),
                 None,
                 None,
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
             contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -30386,6 +30541,8 @@ async fn run_native_code_review_turn(
                 Some(("runtime_unavailable", &error.to_string())),
                 None,
                 None,
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
             contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -30630,6 +30787,8 @@ async fn run_native_code_review_turn(
                     Some(("interrupted", "review/start interrupted by client")),
                     None,
                     None,
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -30754,6 +30913,8 @@ async fn run_native_code_review_turn(
         // token data is in scope here.
         None,
         None,
+        None,
+        // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
     )
     .await;
     contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -32343,6 +32504,8 @@ async fn run_standalone_turn(
             Some(("runtime_unavailable", error.as_str())),
             None,
             steer_buffer.as_ref(),
+            None,
+            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -32393,6 +32556,8 @@ async fn run_standalone_turn(
                 Some(("permission_denied", message.as_str())),
                 None,
                 steer_buffer.as_ref(),
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
             contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -32422,12 +32587,21 @@ async fn run_standalone_turn(
                 Some(("runtime_unavailable", &error.to_string())),
                 None,
                 steer_buffer.as_ref(),
+                None,
+                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
             contracts.scopes.evict_turn(&session_id, &turn_id);
             return;
         }
     };
+    // Outer-loop #4 (§4.2): this turn's peers root — `Some` ONLY when this
+    // session is a peer (topic `peer-<slug>`) running under the profile's
+    // data dir. The interrupted-terminal release below keys the slot registry
+    // by exactly this root + slug; `None` keeps every master turn off the
+    // registry entirely.
+    let peers_root: Option<std::path::PathBuf> =
+        peer_slug_and_profile(&session_id).map(|_| session_runtime.profile.data_dir.join("peers"));
     // Per-project ledger isolation (#1666): every event this turn appends
     // must land under the session's per-cwd storage identity. `session/open`
     // registered it already for the normal flow; re-registering here is an
@@ -32782,6 +32956,8 @@ async fn run_standalone_turn(
             // reply is canned and no token meter ran.
             None,
             steer_buffer.as_ref(),
+            peers_root.as_deref(),
+            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -34355,6 +34531,46 @@ async fn run_standalone_turn(
             {
                 request_agent = request_agent.with_originator_session(originator);
             }
+
+            // Outer-loop #4 (docs/build-cache-pool.md §4.1/§7.4): acquire
+            // (or ADOPT) this turn's build-cache slot. Slot lifecycle is ONE
+            // TURN: boot acquires, the turn terminal releases.
+            //
+            // The registry keeps the original lock and usage tracker during
+            // adoption. An Active claim owned by another session/turn is
+            // rejected before eligibility cleanup or any new allocation.
+            let held_slot = match build_cache_peer::slot_for_owned_turn(
+                &peers_root,
+                &session_runtime.workspace_root,
+                slug,
+                &build_cache_turn_owner(&session_id, &turn_id, &turn_state),
+            ) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    // Eligible peers must not escape the bounded pool by
+                    // falling back to a private, unbounded target directory.
+                    try_emit_terminal(
+                        &turn_state,
+                        TerminalReason::Errored,
+                        &ws,
+                        &ledger,
+                        &session_id,
+                        &turn_id,
+                        Some(("build_cache_unavailable", &error.message)),
+                        None,
+                        steer_buffer.as_ref(),
+                        Some(&peers_root),
+                    )
+                    .await;
+                    contracts.scopes.evict_turn(&session_id, &turn_id);
+                    return;
+                }
+            };
+            if let Some(slot) = held_slot {
+                request_agent = request_agent
+                    .with_build_cache_slot(slot.path)
+                    .with_build_cache_usage(slot.usage);
+            }
         }
     }
     // In-loop compaction delivery (UPCR-2026-026 follow-up): mirror the
@@ -34646,6 +34862,8 @@ async fn run_standalone_turn(
                     Some(("profile_config_unavailable", &error.to_string())),
                     None,
                     steer_buffer.as_ref(),
+                    peers_root.as_deref(),
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -34712,6 +34930,8 @@ async fn run_standalone_turn(
             None,
             None,
             steer_buffer.as_ref(),
+            peers_root.as_deref(),
+            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -34744,6 +34964,8 @@ async fn run_standalone_turn(
             Some(("voice_asr_unavailable", error_message)),
             None,
             None,
+            peers_root.as_deref(),
+            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -34915,6 +35137,7 @@ async fn run_standalone_turn(
                 Some(("peer_lifetime_unavailable", &message)),
                 None,
                 steer_buffer.as_ref(),
+                Some(&session_runtime.profile.data_dir.join("peers")),
             )
             .await;
             contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -36032,6 +36255,8 @@ async fn run_standalone_turn(
                     None,
                     Some(details),
                     steer_buffer.as_ref(),
+                    peers_root.as_deref(),
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 if let Err(error) = commit_gathered_peer_results(
@@ -36171,6 +36396,8 @@ async fn run_standalone_turn(
                         ..Default::default()
                     }),
                     steer_buffer.as_ref(),
+                    peers_root.as_deref(),
+                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 break;
@@ -36569,6 +36796,8 @@ async fn run_standalone_turn(
             )),
             None,
             steer_buffer.as_ref(),
+            peers_root.as_deref(),
+            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         // codex #2 residual — a client-interrupted peer takes THIS branch, not
@@ -37566,6 +37795,11 @@ async fn try_emit_terminal(
     // flips to Terminal and BEFORE the terminal frame below — see
     // `settle_leftover_steers`.
     steer_buffer: Option<&octos_agent::SharedSteerBuffer>,
+    // Outer-loop #4 (§4.2): the peers root for a PEER session's build-cache
+    // slot release at an error or interrupted terminal. `None` on paths that
+    // cannot be a peer turn (M9 fixtures, review scatter-join, slash
+    // dispatch) — those sessions hold no slot, so the release no-ops.
+    peers_root: Option<&std::path::Path>,
 ) {
     // Single terminal gate: state → Terminal, then the steer settlement
     // (`turn/steer_dropped`), then — below — the terminal frame.
@@ -37632,6 +37866,15 @@ async fn try_emit_terminal(
             );
         }
         TerminalReason::Errored => {
+            // A pre-dispatch failure (for example peer lifetime persistence)
+            // skips the result writer, so release here as an idempotent net.
+            release_peer_build_cache_slot(
+                peers_root,
+                session_id,
+                turn_id,
+                turn_state,
+                crate::build_cache::pool::SlotOutcome::Failed,
+            );
             let (code, message) = error_payload.unwrap_or(("runtime_error", "turn failed"));
             // #48b — OLP observability: when the terminal error CARRIES the
             // malformed-exhausted marker as a PREFIX, emit ONLY the
@@ -37673,6 +37916,20 @@ async fn try_emit_terminal(
         TerminalReason::Interrupted => {
             let (code, message) = error_payload.unwrap_or(("interrupted", "turn interrupted"));
             let _ = send_turn_error(ws, ledger, session_id, turn_id, code, message);
+            // Outer-loop #4 (§4.2): an INTERRUPTED turn never reaches
+            // `write_peer_result_if_peer_session` (it aborts the agent task
+            // before the done/error event), so the peer's held slot must be
+            // released HERE or one client interrupt leaks it until serve
+            // restart — with peer_slots=2, two interrupts pool-exhaust the
+            // fleet. Idempotent: a turn that already released at its terminal
+            // finds no registry entry.
+            release_peer_build_cache_slot(
+                peers_root,
+                session_id,
+                turn_id,
+                turn_state,
+                crate::build_cache::pool::SlotOutcome::Cancelled,
+            );
         }
     }
 
@@ -38637,12 +38894,20 @@ async fn abort_connection_turns(
     }
 
     let mut active = active_turns.lock().await;
-    for (session_id, turn_id) in turns {
+    for (session_id, registered) in turns {
+        let turn_id = registered.turn_id.clone();
+        // Reused client IDs do not confer ownership of a newer dispatch.
+        if active
+            .get(&session_id)
+            .is_some_and(|current| !registered.matches(current))
+        {
+            continue;
+        }
         let mut aborted_state: Option<Arc<TokioMutex<TurnState>>> = None;
         let mut aborted_steer: Option<octos_agent::SharedSteerBuffer> = None;
         let should_abort = active
             .get(&session_id)
-            .is_some_and(|active| active.turn_id == turn_id);
+            .is_some_and(|active| registered.matches(active));
         if should_abort {
             if let Some(active) = active.remove(&session_id) {
                 aborted_state = Some(active.state.clone());
@@ -38650,6 +38915,13 @@ async fn abort_connection_turns(
                 active.abort.abort();
             }
         }
+        release_peer_build_cache_slot(
+            None,
+            &session_id,
+            &turn_id,
+            &registered.state,
+            crate::build_cache::pool::SlotOutcome::Cancelled,
+        );
         // #920.1: append a durable terminal event so reconnect-replay
         // sees this turn end. Without this the in-flight turn vanishes
         // from the live registry but no `turn/error` lands, so clients
@@ -40152,6 +40424,13 @@ async fn transition_to_terminal_settling_steers(
     turn_id: &TurnId,
 ) -> Option<TerminalTransition> {
     let transition = transition_to_terminal(turn_state, expected_reason).await?;
+    // Every terminal path, including shortcuts and boot failures, returns its claim.
+    let outcome = match transition.reason {
+        TerminalReason::Completed => crate::build_cache::pool::SlotOutcome::Completed,
+        TerminalReason::Errored => crate::build_cache::pool::SlotOutcome::Failed,
+        TerminalReason::Interrupted => crate::build_cache::pool::SlotOutcome::Cancelled,
+    };
+    release_peer_build_cache_slot(None, session_id, turn_id, turn_state, outcome);
     if let Some(buffer) = steer_buffer {
         settle_leftover_steers(
             buffer,
