@@ -78,6 +78,11 @@ test_a2.md
 !specs/task-approval-post-tool-continuation.spec.md
 !specs/kv-cache-friendly-compaction.spec.md
 !specs/task-compaction-instruction-priority.spec.md
+# peer-status SDD contract (task-evo-peer-turn-status) + consumer field
+# contract — consumed by tests and outer-loop verification; plan under
+# docs/superpowers stays local by convention.
+!specs/task-evo-peer-turn-status.spec.md
+!docs/peer-status-interface.json
 # User-facing docs only (internal analysis/audits stay local)
 !docs/user-guide.md
 !docs/user-guide-zh.md
