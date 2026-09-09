@@ -51,9 +51,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::autonomy::agent_orchestrator::{
-    InProcessAgentOrchestrator, default_agent_orchestrator, run_goal_completion_verifier_with_usage,
-};
+use crate::autonomy::agent_orchestrator::{InProcessAgentOrchestrator, default_agent_orchestrator};
 use crate::autonomy::master_continuation_scheduler::{
     MasterContinuationReason, MasterContinuationRuntimeState, QueuedMasterContinuation,
 };
@@ -5428,33 +5426,29 @@ impl SessionActor {
             // the sentinel verifier (it runs outside the turn's routing scopes),
             // so a failover attributes to this session instead of publishing
             // unattributed. Autonomous turns are Normal policy → router only.
-            let (verdict, verifier_usage) = octos_llm::with_router_context(
+            // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger;
+            // per-attempt usage is charged inside it, so nothing is charged
+            // here anymore.
+            let outcome = octos_llm::with_router_context(
                 octos_llm::RouterContext {
                     session_id: Some(self.session_key.to_string()),
                     ..Default::default()
                 },
-                run_goal_completion_verifier_with_usage(
+                orchestrator.verify_goal_completion_bounded(
+                    &self.session_key,
+                    profile_id,
+                    &snapshot,
                     verifier_provider,
-                    &snapshot.objective,
                     &assistant_tail,
+                    Some(self.data_dir.as_path()),
                 ),
             )
             .await;
-            // #1958 — the verifier call is real goal spend: fold it into the
-            // goal's tokens_used BEFORE `maybe_complete_goal_from_model` can
-            // flip the goal (a `complete` goal can no longer be charged).
-            // `record_goal_turn` above only charged the turn's own tokens.
-            let _ = orchestrator.charge_goal_verifier_usage(
-                &self.session_key,
-                profile_id,
-                Some(&snapshot.goal_id),
-                &verifier_usage,
-            );
             if orchestrator.maybe_complete_goal_from_model(
                 &self.session_key,
                 profile_id,
                 &assistant_tail,
-                &verdict,
+                &outcome.verdict,
                 &snapshot,
                 // #1957 (codex #1) — this interactive-chat goal path carries the
                 // profile data dir, so a sentinel completion syncs to the ledger.

@@ -1421,32 +1421,45 @@ impl Tool for GoalUpdateTool {
                 .map(|dd| orchestrator.model_goal_ledger_findings(dd, &snapshot.goal_id))
                 .unwrap_or_default();
             let evidence = completion_evidence_with_ledger(reason, &ledger_findings);
-            let (verdict, usage) =
-                crate::autonomy::agent_orchestrator::run_goal_completion_verifier_with_usage(
+            // evo-goal-verifier — the SINGLE shared recovery entry: digest
+            // gate → single call → per-attempt charge → budget gate →
+            // bounded retry (≤2 calls) → ledger append. The wrapper owns
+            // the charge; this call site no longer charges directly.
+            let outcome = orchestrator
+                .verify_goal_completion_bounded(
+                    &session_id,
+                    &self.profile_id,
+                    &snapshot,
                     verifier_provider,
-                    &snapshot.objective,
                     &evidence,
+                    self.data_dir.as_deref(),
                 )
                 .await;
-            // #1935 round 5 — exactly-once direct charge, while the goal is
-            // still active/budget_limited (a `complete` goal cannot be
-            // charged). Covers Done AND NotDone outcomes.
-            let _ = orchestrator.charge_goal_verifier_usage(
-                &session_id,
-                &self.profile_id,
-                Some(&snapshot.goal_id),
-                &usage,
-            );
-            if !verdict.is_done() {
+            if !outcome.is_done() {
+                let attempt_note = if outcome.replayed {
+                    format!(
+                        " [replayed verdict from {}]",
+                        outcome
+                            .replayed_of_ts_ms
+                            .map(|ts| ts.to_string())
+                            .unwrap_or_else(|| "history".to_owned())
+                    )
+                } else {
+                    format!(" (attempt {}/{})", outcome.attempts, 2)
+                };
+                let kind_note = outcome
+                    .kind
+                    .map(|k| k.as_str().to_owned())
+                    .unwrap_or_default();
+                let diagnostic_note = outcome
+                    .diagnostic
+                    .as_ref()
+                    .map(|d| format!(" [diagnostic: {d}]"))
+                    .unwrap_or_default();
                 return Ok(ToolResult {
                     output: format!(
-                        "goal_update: completion NOT verified — independent verifier returned: {}",
-                        match verdict {
-                            crate::autonomy::goal_loop_runtime::GoalCompletionVerdict::NotDone {
-                                reason,
-                            } => reason,
-                            _ => "unknown".to_string(),
-                        }
+                        "goal_update: completion NOT verified — verifier {kind_note}{attempt_note}: {}{diagnostic_note}",
+                        outcome.not_done_reason().unwrap_or("unknown"),
                     ),
                     success: false,
                     ..Default::default()
@@ -2012,13 +2025,14 @@ mod tests {
         )
         .expect("build live k3 provider");
 
-        let (verdict, usage) =
-            crate::autonomy::agent_orchestrator::run_goal_completion_verifier_with_usage(
-                provider,
-                "Write the number 42 to a file.",
-                "I wrote 42 to /tmp/answer.txt and verified it with cat.",
-            )
-            .await;
+        let call = crate::autonomy::agent_orchestrator::run_goal_completion_verifier_with_usage(
+            provider,
+            "Write the number 42 to a file.",
+            "I wrote 42 to /tmp/answer.txt and verified it with cat.",
+        )
+        .await;
+        let verdict = call.verdict;
+        let usage = call.usage;
         let is_done = verdict.is_done();
         let reason = match &verdict {
             crate::autonomy::goal_loop_runtime::GoalCompletionVerdict::NotDone { reason } => {
@@ -2070,13 +2084,14 @@ mod tests {
             "四切片实证齐全。".repeat(40),
             "1. [peer:s2] (finding) zai lane done\n2. [peer:s4] (finding) docs done\n".repeat(20)
         );
-        let (verdict, usage) =
-            crate::autonomy::agent_orchestrator::run_goal_completion_verifier_with_usage(
-                provider,
-                "#19 goal peer 多模型能力 + zai GLM 5.2 接入。切片 S1-S4。",
-                &long_evidence,
-            )
-            .await;
+        let call = crate::autonomy::agent_orchestrator::run_goal_completion_verifier_with_usage(
+            provider,
+            "#19 goal peer 多模型能力 + zai GLM 5.2 接入。切片 S1-S4。",
+            &long_evidence,
+        )
+        .await;
+        let verdict = call.verdict;
+        let usage = call.usage;
         let reason = match &verdict {
             crate::autonomy::goal_loop_runtime::GoalCompletionVerdict::NotDone { reason } => {
                 reason.clone()

@@ -131,8 +131,8 @@ use crate::autonomy::agent_orchestrator::{
     LoopListRequest, MonitorControlKind, MonitorControlRequest, MonitorCreateRequest,
     MonitorListRequest, NativeSpecialistAppUiEvent, NativeSpecialistLaunchRequest,
     default_agent_orchestrator, master_continuation_prompt, master_continuation_reason_name,
-    monitor_invalid_spec_error, parse_agent_output_cursor, run_goal_completion_verifier_with_usage,
-    upsert_background_task_agent, wire_key_from_goal_key,
+    monitor_invalid_spec_error, parse_agent_output_cursor, upsert_background_task_agent,
+    wire_key_from_goal_key,
 };
 use crate::autonomy::master_continuation_scheduler::{
     MasterContinuationReason, MasterContinuationRuntimeState, QueuedMasterContinuation,
@@ -32275,28 +32275,27 @@ async fn run_interactive_sentinel_completion(
     // #1958 (codex #3) — the sentinel verifier runs AFTER the turn's routing
     // scopes ended; restore originating-session attribution around it. The
     // event carries the WIRE id, so strip the cwd scope off the pinned key.
-    let (verdict, verifier_usage) = octos_llm::with_router_context(
+    // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger.
+    let outcome = octos_llm::with_router_context(
         octos_llm::RouterContext {
             session_id: Some(wire_key_from_goal_key(pinned_goal_key).to_string()),
             ..Default::default()
         },
-        run_goal_completion_verifier_with_usage(verifier_provider, &snapshot.objective, reply),
+        orchestrator.verify_goal_completion_bounded(
+            pinned_goal_key,
+            charge_profile,
+            &snapshot,
+            verifier_provider,
+            reply,
+            ledger_data_dir,
+        ),
     )
     .await;
-    // #1958 — fold the verifier's real spend into the goal before the flip.
-    // The returned chip event is intentionally dropped: the caller's
-    // unconditional interactive repaint pushes the final snapshot.
-    let _ = orchestrator.charge_goal_verifier_usage(
-        pinned_goal_key,
-        charge_profile,
-        Some(&snapshot.goal_id),
-        &verifier_usage,
-    );
     orchestrator.maybe_complete_goal_from_model(
         pinned_goal_key,
         charge_profile,
         reply,
-        &verdict,
+        &outcome.verdict,
         // #1935 codex round 3 — both snapshot fields are re-checked against
         // the live record inside; a mid-verify swap or objective edit refuses.
         &snapshot,
@@ -37451,31 +37450,23 @@ async fn run_standalone_turn(
                 // attribution around it (a failover would otherwise publish
                 // unattributed / under another session). Autonomous turns are
                 // Normal policy, so only the router context needs restoring.
-                let (verdict, verifier_usage) = octos_llm::with_router_context(
+                // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger;
+                // per-attempt usage is charged inside it.
+                let outcome = octos_llm::with_router_context(
                     octos_llm::RouterContext {
                         session_id: Some(session_id.to_string()),
                         ..Default::default()
                     },
-                    run_goal_completion_verifier_with_usage(
+                    orchestrator.verify_goal_completion_bounded(
+                        goal_key,
+                        &goal_ctx.profile_id,
+                        &snapshot,
                         verifier_provider,
-                        &snapshot.objective,
                         &reply,
+                        Some(goal_ledger_data_dir.as_path()),
                     ),
                 )
                 .await;
-                // #1958 — the verifier call is real goal spend: fold it into
-                // the goal's tokens_used via the scoped key, BEFORE the
-                // completion flip below (a `complete` goal can no longer be
-                // charged). The returned chip event is dropped on purpose —
-                // the unconditional post-accountant push below emits the
-                // final snapshot (including this charge) to the owning
-                // connection.
-                let _ = orchestrator.charge_goal_verifier_usage(
-                    goal_key,
-                    &goal_ctx.profile_id,
-                    Some(&snapshot.goal_id),
-                    &verifier_usage,
-                );
                 // `maybe_complete_goal_from_model` is idempotent and only
                 // flips when `detect_goal_complete_sentinel` matches the
                 // tail of the reply AND the verdict is Done. The return value
@@ -37486,7 +37477,7 @@ async fn run_standalone_turn(
                     goal_key,
                     &goal_ctx.profile_id,
                     &reply,
-                    &verdict,
+                    &outcome.verdict,
                     &snapshot,
                     // #1957 (codex #1) — sync a sentinel completion into the ledger.
                     Some(goal_ledger_data_dir.as_path()),
