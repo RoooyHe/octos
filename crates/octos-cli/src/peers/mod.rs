@@ -6406,6 +6406,22 @@ mod peer_turn_status_tests {
     }
 
     #[test]
+    fn peer_list_rate_limited_outcome_surfaces() {
+        // K3 first-review F13: rate_limited is in the strict whitelist
+        // (mod.rs:4235) but had no fixture coverage. Same shape as the
+        // interrupted scenario: terminal evidence + trusted Failed
+        // lifetime → execution=failed, last_outcome=rate_limited.
+        let temp = tempfile::tempdir().unwrap();
+        let dir = staged(temp.path(), "rl", None);
+        terminal(&dir, "rl", 1, "rate_limited");
+        lifetime(&dir, "octos", "rl", "failed", 1, Some("t1"), None);
+        let f = facet(temp.path(), "rl");
+        assert_eq!(f.execution, "failed");
+        assert_eq!(f.last_outcome.as_deref(), Some("rate_limited"));
+        assert_eq!(f.rounds_delivered, 1);
+    }
+
+    #[test]
     fn peer_list_no_lifetime_execution_unknown_outcome_kept() {
         let temp = tempfile::tempdir().unwrap();
         let dir = staged(temp.path(), "nl", None);
@@ -6737,8 +6753,6 @@ mod peer_turn_status_compat_tests {
         // truncation-to-no-outcome path is therefore exercised at the
         // scanner level above (Err ⇒ wrapper None ⇒ no outcome by
         // construction in read_last_terminal_evidence: `?` on the Option).
-        let facet = derive_peer_execution_facet(&dir, "octos", "capped", false);
-        assert_eq!(facet.rounds_delivered, 3, "count semantics unaffected");
         let facet = derive_peer_execution_facet(&dir, "octos", "capped", false);
         assert_eq!(facet.rounds_delivered, 3, "count semantics unaffected");
     }

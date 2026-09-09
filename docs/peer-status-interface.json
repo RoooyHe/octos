@@ -51,5 +51,9 @@
     "digest_mismatch_test": "反例测试必须包含 nonempty 但不匹配的 digest（peer_list_idle_digest_mismatch_degrades_to_unknown）。"
   },
   "profile_resolution": "CLI：--profile <id>（默认 octos/DEFAULT_PROFILE_ID）显式传入投影校验；--data-dir 为任意合法路径，不从目录名推导 profile；serve 回调用已知 profile_id。",
-  "idle_binding": "Idle 采信条件：fd-anchored 读 result.md 并计算 SHA256 与 lifetime.result_digest 实际相等；空白/错误/不匹配摘要或文件缺失 → unknown。仅比对摘要，不解析正文。"
+  "idle_binding": "Idle 采信条件：fd-anchored 读 result.md 并计算 SHA256 与 lifetime.result_digest 实际相等；空白/错误/不匹配摘要或文件缺失 → unknown。仅比对摘要，不解析正文。",
+  "clarifications": {
+    "round_on_terminal_phases": "idle/failed 时若有严格终止证据（turns 尾行 × 最高 result-<n>.md 互证）则取该证据的轮号，否则 rounds_delivered；正常连续编号盘面两者恒等。（GLM 首审 LOW#3 裁决采纳：保留实现的更大信息量，契约措辞对齐）",
+    "legacy_bare_only_outcome": "last_outcome 需要 result-<n>.md 印证（Side B）；bare-only（仅 result.md+turns.txt）legacy 盘面为 null——保守方向，不 assert 无印证的 outcome。（GLM 首审 LOW#4 裁决采纳）"
+  }
 }
