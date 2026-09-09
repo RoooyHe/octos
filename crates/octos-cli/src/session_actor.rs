@@ -10273,6 +10273,7 @@ mod tests;
 /// lane, data_dir) so the REAL `maybe_advance_goal_runtime_after_turn` can
 /// be driven end-to-end without a full registry bootstrap.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments, private_interfaces)]
 pub(crate) fn session_actor_for_goal_test(
     session_key: SessionKey,
     agent: Arc<Agent>,
@@ -10287,7 +10288,6 @@ pub(crate) fn session_actor_for_goal_test(
         mpsc::Sender<ActorMessage>,
         mpsc::Receiver<ActorMessage>,
     ) = mpsc::channel(1);
-    let data_dir = data_dir;
     let actor = SessionActor {
         session_key,
         channel: "api".to_owned(),

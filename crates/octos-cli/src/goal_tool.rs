@@ -2689,7 +2689,7 @@ mod tests {
     /// when a goal-scoped peer parks (`model_goal_record_peer_escalation`) but
     /// until this fold no production read existed, so the master model could
     /// never see them. Same data_dir gate as `ledger_findings`.
-
+    //
     /// evo-goal-verifier M4 (spec Filter: goal_update_reports_structured_
     /// verifier_failure, CallFailed variant): two transient call failures
     /// cap at attempt 2/2 and the refusal output names call_failed.
