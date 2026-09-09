@@ -402,6 +402,37 @@ impl GoalVerifierOutcome {
     }
 }
 
+/// evo-goal-verifier (spec Decision 1/6, M5): ONE canonical human-readable
+/// NotDone line shared by every call site — goal_tool's ToolResult output
+/// and the three sentinel stations' failure notes — so the structured
+/// `{kind} (attempt n/2): reason [replayed…][diagnostic]` format cannot
+/// drift between the four entry points. Done renders as `done`.
+impl fmt::Display for GoalVerifierOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_done() {
+            return f.write_str("done");
+        }
+        let kind = self.kind.map(|k| k.as_str()).unwrap_or("unknown");
+        write!(
+            f,
+            "verifier {kind} (attempt {}/{}): {}",
+            self.attempts,
+            crate::autonomy::agent_orchestrator::VERIFIER_MAX_ATTEMPTS,
+            self.not_done_reason().unwrap_or("unknown")
+        )?;
+        if self.replayed {
+            match self.replayed_of_ts_ms {
+                Some(ts) => write!(f, " [replayed verdict from {ts}]")?,
+                None => f.write_str(" [replayed verdict from history]")?,
+            }
+        }
+        if let Some(d) = &self.diagnostic {
+            write!(f, " [diagnostic: {d}]")?;
+        }
+        Ok(())
+    }
+}
+
 /// Parsed verdict of a raw verifier reply — the pure, sync, provider-free
 /// core of the strict DONE protocol (spec Decision 2, final rule).
 ///

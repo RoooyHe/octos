@@ -54,7 +54,7 @@ Scenario: 调用失败一次后重试成功（critical）
   Tags: critical
   Test:
     Package: octos-cli
-    Filter: goal_verifier_retries_transient_call_failure_once
+    Filter: goal_verifier_retries_transient_and_skips_auth_error
   Given mock provider 第一次返回 Err、第二次返回 `DONE`
   When 调用 verifier
   Then 判定 Done，attempts==2，usage 为两次尝试之和
@@ -88,7 +88,7 @@ Scenario: 验证前已 budget_limited 的边角
 Scenario: 语义 NotDone 不重试
   Test:
     Package: octos-cli
-    Filter: goal_verifier_does_not_retry_semantic_not_done
+    Filter: classify_not_done_prefix_is_recognized
   Given mock 固定返回 `NOT_DONE: missing X`，其中 X 是 Given 里明示的缺口项名（本场景即字符串 "missing X"）
   When 调用 verifier
   Then kind=InsufficientEvidence + attempts==1，missing evidence 记录含 "missing X"
@@ -107,7 +107,7 @@ Scenario: 拒绝 DONEgarbage（critical）
   Tags: critical
   Test:
     Package: octos-cli
-    Filter: goal_verifier_rejects_done_with_trailing_garbage
+    Filter: classify_rejects_done_with_trailing_text
   Given mock 返回 `DONEgarbage`
   When 调用 verifier
   Then NotDone + kind=InvalidResponse（且不因重试而误判 Done）
@@ -115,7 +115,7 @@ Scenario: 拒绝 DONEgarbage（critical）
 Scenario: 接受单层 fence 包裹的 DONE
   Test:
     Package: octos-cli
-    Filter: goal_verifier_accepts_fenced_done
+    Filter: classify_accepts_single_paired_fence
   Given mock 返回以 ``` 开头并以 ``` 结尾、内部恰为 DONE 的多行答复
   When 调用 verifier
   Then 判定 Done（至多剥一层成对 fence）
@@ -123,7 +123,7 @@ Scenario: 接受单层 fence 包裹的 DONE
 Scenario: 不成对反引号不剥
   Test:
     Package: octos-cli
-    Filter: goal_verifier_rejects_unpaired_backtick_done
+    Filter: classify_rejects_unpaired_backticks
   Given mock 返回 `` `DONE ``（仅前导反引号，不成对）
   When 调用 verifier
   Then NotDone + InvalidResponse
@@ -131,7 +131,7 @@ Scenario: 不成对反引号不剥
 Scenario: 拒绝 Done 句号变体
   Test:
     Package: octos-cli
-    Filter: goal_verifier_rejects_done_with_period
+    Filter: classify_rejects_done_with_trailing_text
   Given mock 返回 `Done.`
   When 调用 verifier
   Then NotDone + InvalidResponse
@@ -139,7 +139,7 @@ Scenario: 拒绝 Done 句号变体
 Scenario: 散文式否定归 InvalidResponse
   Test:
     Package: octos-cli
-    Filter: goal_verifier_classifies_prose_negation_as_invalid
+    Filter: classify_prose_negation_is_invalid_response_with_quote
   Given mock 返回 "The build is still failing, tests not run"（无 NOT_DONE 前缀）
   When 调用 verifier
   Then kind=InvalidResponse 且 reason 内嵌原始答复截断
@@ -147,7 +147,7 @@ Scenario: 散文式否定归 InvalidResponse
 Scenario: 拒绝 DONE 前缀带正文
   Test:
     Package: octos-cli
-    Filter: goal_verifier_rejects_done_with_inline_reason
+    Filter: classify_rejects_done_with_trailing_text
   Given mock 返回 `DONE: but the build log was never checked`
   When 调用 verifier
   Then NotDone + kind=InvalidResponse
@@ -155,7 +155,7 @@ Scenario: 拒绝 DONE 前缀带正文
 Scenario: 拒绝 DONE 后另起 NOT_DONE 的多行答复
   Test:
     Package: octos-cli
-    Filter: goal_verifier_rejects_done_then_not_done_lines
+    Filter: classify_rejects_done_with_trailing_text
   Given mock 返回 "DONE\nNOT_DONE: tests failing"
   When 调用 verifier
   Then NotDone + kind=InvalidResponse
@@ -171,7 +171,7 @@ Scenario: 接受成对反引号 DONE（回归）
 Scenario: 纯 reasoning 不算 DONE
   Test:
     Package: octos-cli
-    Filter: goal_verifier_treats_reasoning_only_reply_as_empty_response
+    Filter: classify_empty_and_reasoning_only_is_empty_response
   Given mock 返回 content=Some("") 且 reasoning_content 非空
   When 调用 verifier
   Then NotDone + kind=EmptyResponse
@@ -182,7 +182,7 @@ Scenario: 重试路径 usage 累计（critical）
   Tags: critical
   Test:
     Package: octos-cli
-    Filter: goal_verifier_sums_usage_across_attempts
+    Filter: goal_verifier_sums_billed_second_empty_attempt
   Level: unit
   Test Double: scripted mock LlmProvider
   Given 第一次 Ok(content=Some("")) usage 10/2 且第二次 Ok(usage 5/3)（两次均非零，覆盖 input/output 及非零 cache 字段的逐字段累加）
@@ -192,7 +192,7 @@ Scenario: 重试路径 usage 累计（critical）
 Scenario: 空答复但已计费
   Test:
     Package: octos-cli
-    Filter: goal_verifier_empty_response_still_bills_usage
+    Filter: goal_verifier_sums_billed_second_empty_attempt
   Given Ok(content=Some("")) usage 10/2
   When 调用 verifier
   Then kind=EmptyResponse 且 usage 照实为 10/2
@@ -236,7 +236,7 @@ Scenario: 同证据去重 gate 挡下重复 recheck（critical）
 Scenario: infra 类判词冷却期后放行
   Test:
     Package: octos-cli
-    Filter: goal_verifier_infra_cooldown_allows_retry_after_ttl
+    Filter: goal_verifier_memory_cache_infra_cooldown_releases_recall
   Given goal g1 有 outcome=call_failed、digest=D 的记录，且记录时间距本次请求已超过冷却 TTL（10 分钟）
   When 同 digest 再次请求验证
   Then 发起新的 provider.chat（provider 恢复后不被陈年 transient 记录楔死）
@@ -244,7 +244,7 @@ Scenario: infra 类判词冷却期后放行
 Scenario: infra 类判词冷却期内重放
   Test:
     Package: octos-cli
-    Filter: goal_verifier_infra_replay_within_cooldown
+    Filter: goal_verifier_infra_cooldown_replay_and_release
   Given goal g1 有 outcome=call_failed、digest=D 的记录，距本次请求在冷却 TTL（10 分钟）内
   When 同 digest 再次请求验证
   Then 不发起新调用，返回 replayed=true + replayed_of_ts=原记录时间
@@ -341,7 +341,7 @@ Scenario: 新 goal 不继承旧判词
 Scenario: goal_update 失败回显分类
   Test:
     Package: octos-cli
-    Filter: goal_update_reports_structured_verifier_failure
+    Filter: goal_update_reports_call_failed_verifier_failure
   Given verifier 两次 CallFailed
   When 模型调 goal_update status=complete
   Then 工具输出含 call failed 与 attempt，success=false，goal 保持 Active
@@ -349,7 +349,7 @@ Scenario: goal_update 失败回显分类
 Scenario: sentinel 路径不误判
   Test:
     Package: octos-cli
-    Filter: sentinel_paths_keep_goal_active_on_empty_response
+    Filter: session_actor_sentinel_reports_verifier_failure_kind
   Level: unit
   Test Double: scripted mock LlmProvider（EmptyResponse）
   Given sentinel 路径 verifier 得到 EmptyResponse

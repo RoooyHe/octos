@@ -17,11 +17,11 @@
 1. [x] 合约：spec v3 + lint（100%，29 scenarios）。
 2. [x] GLM/k3 双只读 peer 独立设计审查（design-glm.md / design-k3.md），先不互读。
 3. [x] 定点互审收编：v3 合并裁决已落 spec；两 peer 结论一致度高，分歧（散文归类 InvalidResponse vs InsufficientEvidence）裁决为 InvalidResponse（k3：无法区分语义 vs 协议违规，归格式错更诚实）。
-4. [ ] RED：按 spec 29 个场景写失败测试。
-5. [ ] GREEN：分层实现（纯函数解析 → 自由函数重构 → wrapper → 账本 → 调用点迁移）。
-6. [ ] 必跑验证：`cargo test -p octos-cli --features api --all-targets -- --test-threads=8`、`cargo clippy -p octos-cli --features api --all-targets -- -D warnings`、`cargo fmt --all -- --check`、spec lifecycle。
-7. [ ] 独立实现审查（independent-glm.md / independent-k3.md）→ 互审（cross-glm.md / cross-k3.md），首审不覆盖。
-8. [ ] 落 .octos/progress.md（真实 ids）+ 提交（仅本任务文件，禁 git add -A）+ 外层复验。
+4. [x] RED：按 spec 29 个场景写失败测试（外层 runtime 反例 0pass/2fail EXIT101 → .octos/k3-rescue-logs/red-outer-probes.log）。
+5. [x] GREEN：分层实现（纯函数解析 → 自由函数重构 → wrapper → 账本 → 调用点迁移；22pass/0fail/1ignored + 2 outer probes EXIT0 + clippy -D warnings EXIT0，.octos/k3-rescue-logs/）。
+6. [~] 必跑验证（fmt/clippy/done 前候选已过：clippy -D warnings EXIT0、fmt EXIT0；全量 all-targets 由 root d246b74b 10030pass 采信——但本修复增量 delta 的全量待 root 租约释放后重跑）：`cargo test -p octos-cli --features api --all-targets -- --test-threads=8`、`cargo clippy -p octos-cli --features api --all-targets -- -D warnings`、`cargo fmt --all -- --check`、spec lifecycle。
+7. [x] 独立实现审查 implementation-glm-first.md（APPROVE-WITH-CHANGES）/ implementation-k3-first.md（APPROVE）→ cross-primary-on-k3.md / cross-strong-on-glm.md（含 root 纠偏追加），sha256 全冻结，token_cost.model 双证（glm-5.3 / k3-256k）。
+8. [~] 修复增量（M1/M3/M4/M5 + GAP-1..8 + 16 Filter 绑定）已编辑待租约 RED→GREEN 验证 → 提交候选后续 commit + 通知 root 外层复验。
 
 ## 风险
 

@@ -1436,31 +1436,11 @@ impl Tool for GoalUpdateTool {
                 )
                 .await;
             if !outcome.is_done() {
-                let attempt_note = if outcome.replayed {
-                    format!(
-                        " [replayed verdict from {}]",
-                        outcome
-                            .replayed_of_ts_ms
-                            .map(|ts| ts.to_string())
-                            .unwrap_or_else(|| "history".to_owned())
-                    )
-                } else {
-                    format!(" (attempt {}/{})", outcome.attempts, 2)
-                };
-                let kind_note = outcome
-                    .kind
-                    .map(|k| k.as_str().to_owned())
-                    .unwrap_or_default();
-                let diagnostic_note = outcome
-                    .diagnostic
-                    .as_ref()
-                    .map(|d| format!(" [diagnostic: {d}]"))
-                    .unwrap_or_default();
+                // M5: single canonical formatting source — the Display impl
+                // on GoalVerifierOutcome. All four call sites render the
+                // same `verifier {kind} (attempt n/2): reason` line.
                 return Ok(ToolResult {
-                    output: format!(
-                        "goal_update: completion NOT verified — verifier {kind_note}{attempt_note}: {}{diagnostic_note}",
-                        outcome.not_done_reason().unwrap_or("unknown"),
-                    ),
+                    output: format!("goal_update: completion NOT verified — {outcome}"),
                     success: false,
                     ..Default::default()
                 });
@@ -2142,6 +2122,43 @@ mod tests {
         }
     }
 
+    /// evo-goal-verifier M4: always fails with a RETRYABLE server error so
+    /// the bounded wrapper burns both attempts (attempt 2/2) before
+    /// refusing with kind=call_failed.
+    struct FailingVerifierProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for FailingVerifierProvider {
+        fn default() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl octos_llm::LlmProvider for FailingVerifierProvider {
+        async fn chat(
+            &self,
+            _messages: &[octos_core::Message],
+            _tools: &[octos_llm::ToolSpec],
+            _config: &octos_llm::ChatConfig,
+        ) -> Result<octos_llm::ChatResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(eyre::eyre!(octos_llm::LlmError::new(
+                octos_llm::LlmErrorKind::ServerError { status: 503 },
+                "always failing",
+            )))
+        }
+        fn model_id(&self) -> &str {
+            "failing-verifier"
+        }
+        fn provider_name(&self) -> &str {
+            "failing-verifier"
+        }
+    }
+
     /// Captures the Debug of the messages the verifier is called with, so a
     /// test can assert exactly what evidence reached the independent verifier.
     struct CapturingVerifierProvider {
@@ -2592,6 +2609,19 @@ mod tests {
             .expect("goal_update runs");
         assert!(!result.success, "NotDone verdict refuses the transition");
         assert!(result.tokens_used.is_none(), "no stamp on refusal either");
+        // M4 (cross/GAP hardening): the refusal output must carry the
+        // STRUCTURED kind + attempt + reason via the canonical Display line.
+        assert!(
+            result
+                .output
+                .contains("verifier insufficient_evidence (attempt 1/2)"),
+            "structured kind+attempts in refusal output, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("evidence missing"),
+            "missing-evidence reason surfaced"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let (tokens_used, _, _) = orchestrator
             .goal_counters_for_test(&session)
@@ -2659,6 +2689,43 @@ mod tests {
     /// when a goal-scoped peer parks (`model_goal_record_peer_escalation`) but
     /// until this fold no production read existed, so the master model could
     /// never see them. Same data_dir gate as `ledger_findings`.
+
+    /// evo-goal-verifier M4 (spec Filter: goal_update_reports_structured_
+    /// verifier_failure, CallFailed variant): two transient call failures
+    /// cap at attempt 2/2 and the refusal output names call_failed.
+    #[tokio::test]
+    async fn goal_update_reports_call_failed_verifier_failure() {
+        use crate::autonomy::agent_orchestrator::{AgentOrchestrator as _, GoalSetRequest};
+        let orchestrator = default_agent_orchestrator();
+        let session = SessionKey("verifier-callfailed-prof:api:goal-update-callfailed".to_owned());
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session.clone(),
+                profile_id: "verifier-callfailed-prof".to_owned(),
+                objective: "surface call failure".to_owned(),
+                status: Some("active".to_owned()),
+                token_budget: Some(10_000),
+                transition_actor: None,
+            })
+            .expect("set goal");
+
+        let verifier = std::sync::Arc::new(FailingVerifierProvider::default());
+        let tool = GoalUpdateTool::new("verifier-callfailed-prof").with_verifier_provider(verifier);
+        let mut ctx = ToolContext::zero();
+        ctx.parent_session_key = Some(session.0.clone());
+
+        let result = tool
+            .execute_with_context(&ctx, &json!({"status": "complete", "reason": "attempt"}))
+            .await
+            .expect("goal_update runs");
+        assert!(!result.success, "call failure refuses the transition");
+        assert!(
+            result.output.contains("verifier call_failed (attempt 2/2)"),
+            "call_failed kind + capped attempts in output, got: {}",
+            result.output
+        );
+    }
+
     #[tokio::test]
     async fn goal_get_includes_open_escalations_when_data_dir_set() {
         use crate::autonomy::agent_orchestrator::{AgentOrchestrator as _, GoalSetRequest};

@@ -4987,7 +4987,7 @@ impl InProcessAgentOrchestrator {
                     | Some(GoalVerifierFailureKind::EmptyResponse)
             ) && (call.kind != Some(GoalVerifierFailureKind::CallFailed)
                 || call.call_error_retryable)
-                && attempts < 2
+                && attempts < VERIFIER_MAX_ATTEMPTS
                 && self.goal_status_is_active(session_id, profile_id, snapshot);
             if retry {
                 continue;
@@ -16305,6 +16305,10 @@ pub(crate) struct SingleVerifierCall {
 }
 
 /// Max chars of a provider error kept in the structured result / ledger.
+/// evo-goal-verifier (bounded retry): a transient verifier failure earns at
+/// most ONE retry — two provider chats total, across every call site.
+pub(crate) const VERIFIER_MAX_ATTEMPTS: u32 = 2;
+
 pub(crate) const VERIFIER_CALL_ERROR_CHARS: usize = 400;
 
 pub(crate) async fn run_goal_completion_verifier_with_usage(
@@ -39768,6 +39772,608 @@ mod tests {
         assert_eq!(outcome.usage.reasoning_tokens, 33, "3 + 30");
         assert_eq!(outcome.usage.cache_read_tokens, 44, "4 + 40");
         assert_eq!(outcome.usage.cache_write_tokens, 55, "5 + 50");
+    }
+
+    /// Test util: read the EXACT ledger file for a session's verifier
+    /// scope (file name = scope fingerprint hex) — never a goal_id scan
+    /// across sessions (root fix ②: scope-exact rows).
+    fn read_scope_ledger_rows(
+        temp: &tempfile::TempDir,
+        session_id: &SessionKey,
+        profile_id: &str,
+        snapshot: &crate::autonomy::agent_orchestrator::GoalVerificationSnapshot,
+    ) -> Vec<String> {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let scope = orchestrator.verifier_scope(
+            Some(temp.path()),
+            session_id,
+            profile_id,
+            &snapshot.goal_id,
+        );
+        let path = verifier_ledger_path(temp.path(), &scope.fingerprint);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// evo-goal-verifier GAP-1 (spec Filter): persistent double transient
+    /// failure is capped at exactly TWO provider chats.
+    #[tokio::test]
+    async fn goal_verifier_caps_attempts_at_two_on_persistent_call_failure() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "caps-two");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "caps attempts".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![
+                ScriptedReply::ErrRetryable("503 first"),
+                ScriptedReply::ErrRetryable("503 second"),
+            ]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(outcome.kind.map(|k| k.as_str()), Some("call_failed"));
+        assert_eq!(outcome.attempts, 2, "cap at two total attempts");
+        assert_eq!(provider.chats(), 2, "exactly two provider chats");
+    }
+
+    /// evo-goal-verifier GAP-2 (spec Filter): a goal already non-active
+    /// BEFORE the first retry decision never earns a second chat.
+    #[tokio::test]
+    async fn goal_verifier_skips_retry_when_goal_not_active_before_first_attempt() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "pre-limited");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "pre limited".into(),
+                // Real pre-limited edge: the goal is ALREADY budget_limited
+                // before the verifier's first retry decision. Policy
+                // rejects a zero budget, so seed a real budget and flip the
+                // goal to budget_limited through the sanctioned status set
+                // (same enum the per-attempt charge uses).
+                status: Some("budget_limited".into()),
+                token_budget: Some(10),
+                transition_actor: None,
+            })
+            .expect("set goal already budget-limited");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![
+                ScriptedReply::ErrRetryable("503 first"),
+                ScriptedReply::ErrRetryable("503 second"),
+            ]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(outcome.attempts, 1, "no retry when goal not active");
+        assert_eq!(provider.chats(), 1);
+        // K3 补强: the single failed attempt still lands a durable row so
+        // the "never retried" fact is itself auditable in the ledger.
+        assert_eq!(
+            outcome.kind.map(|k| k.as_str()),
+            Some("call_failed"),
+            "retryable error with the gate closed classifies CallFailed"
+        );
+        let rows = read_scope_ledger_rows(&temp, &session_id, "tenant-a", &snapshot);
+        assert_eq!(rows.len(), 1, "the single attempt is recorded");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row parses");
+        assert_eq!(row["outcome"], "call_failed");
+        assert_eq!(row["attempts"], 1, "durable row shows no second attempt");
+    }
+
+    /// evo-goal-verifier M3 (spec Filter): a first-token DONE with body is
+    /// InvalidResponse and must NOT be retried — exactly one chat.
+    #[tokio::test]
+    async fn goal_verifier_does_not_retry_invalid_response() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "no-retry-invalid");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "invalid no retry".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![
+                ScriptedReply::Ok {
+                    content: "DONE: but actually not finished",
+                    usage: usage_of(5, 2, 0, 0, 0),
+                },
+                ScriptedReply::Ok {
+                    content: "DONE",
+                    usage: usage_of(1, 1, 0, 0, 0),
+                },
+            ]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(
+            outcome.kind.map(|k| k.as_str()),
+            Some("invalid_response"),
+            "DONE with body is InvalidResponse"
+        );
+        assert_eq!(outcome.attempts, 1, "format errors never earn a retry");
+        assert_eq!(provider.chats(), 1);
+    }
+
+    /// evo-goal-verifier GAP-3 (spec Filter): the durable ledger row for a
+    /// FAILED verification records the failure kind and attempt count.
+    #[tokio::test]
+    async fn goal_verifier_ledger_records_failure_kind_and_attempts() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "fail-row");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "failure row".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "NOT_DONE: missing X",
+                usage: usage_of(3, 1, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence-fail",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(
+            outcome.kind.map(|k| k.as_str()),
+            Some("insufficient_evidence")
+        );
+        assert_eq!(outcome.attempts, 1);
+        // Read the durable JSONL back — scope-EXACT file (root fix ②).
+        let ledger_rows = read_scope_ledger_rows(&temp, &session_id, "tenant-a", &snapshot);
+        assert_eq!(ledger_rows.len(), 1, "one row for this scope");
+        let row: serde_json::Value = serde_json::from_str(&ledger_rows[0]).expect("row parses");
+        assert_eq!(row["version"], 3);
+        assert_eq!(row["outcome"], "insufficient_evidence");
+        assert_eq!(row["attempts"], 1);
+        assert!(
+            row["missing_evidence"]
+                .as_str()
+                .unwrap_or("")
+                .contains("missing X")
+        );
+
+        // ── root fix ①: the ORIGINAL cross gap is the CallFailed
+        // double-failure row — two retryable errors burn both attempts and
+        // the durable row must read back outcome=call_failed, attempts=2.
+        let session_b = SessionKey::with_profile("tenant-a", "api", "fail-row-callfailed");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_b.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "call failed row".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal b");
+        let snapshot_b = orchestrator
+            .goal_verification_snapshot(&session_b, "tenant-a")
+            .expect("snapshot b");
+        let provider_b = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![
+                ScriptedReply::ErrRetryable("503 first"),
+                ScriptedReply::ErrRetryable("503 second"),
+            ]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome_b = orchestrator
+            .verify_goal_completion_bounded(
+                &session_b,
+                "tenant-a",
+                &snapshot_b,
+                provider_b.clone(),
+                "evidence-callfailed",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(outcome_b.kind.map(|k| k.as_str()), Some("call_failed"));
+        assert_eq!(outcome_b.attempts, 2, "both attempts burned");
+        let rows_b = read_scope_ledger_rows(&temp, &session_b, "tenant-a", &snapshot_b);
+        assert_eq!(rows_b.len(), 1, "exactly one row for this scope");
+        let row_b: serde_json::Value = serde_json::from_str(&rows_b[0]).expect("row b parses");
+        assert_eq!(row_b["version"], 3);
+        assert_eq!(
+            row_b["outcome"], "call_failed",
+            "durable row carries the failure kind"
+        );
+        assert_eq!(row_b["attempts"], 2, "durable row carries both attempts");
+        // K3 补强: both attempts really reached the provider, and the row
+        // keeps the provider error summary for diagnosis.
+        assert_eq!(provider_b.chats(), 2, "both attempts hit the provider");
+        assert!(
+            row_b["error"].as_str().unwrap_or("").contains("503"),
+            "durable row carries the provider error summary, got: {row_b}"
+        );
+    }
+
+    /// evo-goal-verifier GAP-4 (spec Filter): the durable ledger is
+    /// append-only — a resumed goal with changed evidence keeps the old
+    /// rows intact (history preservation across resume).
+    #[tokio::test]
+    async fn goal_verifier_ledger_preserves_history_across_resume() {
+        // root fix ③: a REAL pause → resume round-trip on the SAME goal,
+        // not just changed evidence. The goal record walks active → paused
+        // → active; the durable ledger keeps every prior row; the resumed
+        // goal with UNCHANGED evidence still replays the pre-pause verdict
+        // (no false re-spend), and a post-resume NEW evidence row appends
+        // WITHOUT overwriting history.
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "resume-real");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "real resume".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        // Pre-pause verdict: DONE with evidence A.
+        let provider = ScriptedVerifierProvider::done();
+        let first = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider,
+                "evidence-A",
+                Some(temp.path()),
+            )
+            .await;
+        assert!(first.is_done() && !first.replayed);
+
+        // ── real PAUSE: same goal id, status → paused via set_goal.
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "real resume".into(),
+                status: Some("paused".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("pause the goal");
+        // Root correction ②: `goal_verification_snapshot` (agent_orchestrator
+        // :1837-1852) gates on PROFILE ONLY — a paused goal still yields a
+        // snapshot. Assert the REAL goal state instead: status == "paused"
+        // on the SAME goal id (both helpers re-scope the wire key
+        // internally, like `goal_fleet_id_for_test`).
+        assert_eq!(
+            orchestrator.goal_status_for_test(&session_id).as_deref(),
+            Some("paused"),
+            "the goal is really paused"
+        );
+        assert_eq!(
+            orchestrator.goal_id_for_test(&session_id).as_deref(),
+            Some(snapshot.goal_id.as_str()),
+            "pause keeps the same goal identity"
+        );
+
+        // ── real RESUME: status → active again, SAME goal identity.
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "real resume".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("resume the goal");
+        let resumed_snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("resumed goal verifies again");
+        // Resume BUMPS the revision (set_goal mutates the goal record), so
+        // the evidence digest (objective+evidence+revision, :16455) changes:
+        // the contract (spec 218-225) promises only same-goal-id history
+        // retention — NEVER a pre-pause replay. Do not assert one.
+        assert_eq!(
+            resumed_snapshot.goal_id, snapshot.goal_id,
+            "resume keeps the same goal id"
+        );
+        assert_ne!(
+            resumed_snapshot.revision, snapshot.revision,
+            "resume bumps the revision → a new digest, no replay assumption"
+        );
+
+        // Post-resume verification runs FRESH (revision changed → digest
+        // changed → gate Miss) and its row APPENDS; history intact.
+        let provider_new = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "NOT_DONE: missing B",
+                usage: usage_of(2, 1, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let resumed_new = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &resumed_snapshot,
+                provider_new.clone(),
+                "evidence-A",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(
+            resumed_new.kind.map(|k| k.as_str()),
+            Some("insufficient_evidence"),
+            "post-resume call produces a fresh verdict"
+        );
+        assert!(
+            !resumed_new.replayed,
+            "revision bump → new digest → a real provider call, not a replay"
+        );
+        assert_eq!(provider_new.chats(), 1, "the provider was really called");
+
+        // Scope-exact ledger: TWO rows total under the SAME goal id —
+        // append-only across the pause/resume round-trip, old row intact.
+        let rows = read_scope_ledger_rows(&temp, &session_id, "tenant-a", &resumed_snapshot);
+        assert_eq!(rows.len(), 2, "both rows preserved across resume");
+        let row_a: serde_json::Value = serde_json::from_str(&rows[0]).expect("row A");
+        let row_b: serde_json::Value = serde_json::from_str(&rows[1]).expect("row B");
+        assert_eq!(row_a["outcome"], "done", "pre-pause row intact");
+        assert_eq!(row_b["outcome"], "insufficient_evidence");
+        assert_eq!(
+            row_a["goal_id"], row_b["goal_id"],
+            "both rows live under the same goal id (spec 218-225)"
+        );
+        // K3 补强: the original row is not a replay artifact, and the two
+        // rows carry DISTINCT evidence digests (revision bumped on resume).
+        assert_eq!(
+            row_a["replayed"], false,
+            "the pre-pause row is the original verdict, not a replay"
+        );
+        assert_ne!(
+            row_a["evidence_digest"], row_b["evidence_digest"],
+            "the resume revision bump changes the digest"
+        );
+    }
+
+    /// evo-goal-verifier GAP-5 (spec Filter): diagnostics/replay metadata
+    /// never leak into the evidence digest — same objective+evidence across
+    /// two fresh goals digests identically.
+    #[tokio::test]
+    async fn goal_verifier_diagnostics_do_not_mutate_evidence_digest() {
+        // Root correction ①: `verifier_evidence_digest(objective, evidence,
+        // revision)` (:16455) includes NO scope — the scope fingerprint is
+        // a DIFFERENT key (the ledger FILENAME, :16716). The old negative
+        // control (assert_ne! across two scopes) was a WRONG PREMISE: same
+        // (objective, evidence, revision) MUST digest identically across
+        // scopes. The real contract: diagnostics (missing_evidence) ride on
+        // the row but never enter the digest key.
+        //
+        // Two ISOLATED verifier scopes — two fresh orchestrators + two
+        // fresh data dirs (simpler: no replay suppression, revisions align
+        // trivially) — same objective/evidence, DIFFERENT NOT_DONE reasons.
+        let orch_a = InProcessAgentOrchestrator::default();
+        let orch_b = InProcessAgentOrchestrator::default();
+        let temp_a = tempfile::TempDir::new().expect("temp dir a");
+        let temp_b = tempfile::TempDir::new().expect("temp dir b");
+        let session_a = SessionKey::with_profile("tenant-a", "api", "digest-a");
+        let session_b = SessionKey::with_profile("tenant-a", "api", "digest-b");
+        orch_a
+            .set_goal(GoalSetRequest {
+                session_id: session_a.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "digest stability".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set goal a");
+        orch_b
+            .set_goal(GoalSetRequest {
+                session_id: session_b.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "digest stability".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set goal b");
+        let snapshot_a = orch_a
+            .goal_verification_snapshot(&session_a, "tenant-a")
+            .expect("snapshot a");
+        let snapshot_b = orch_b
+            .goal_verification_snapshot(&session_b, "tenant-a")
+            .expect("snapshot b");
+        assert_eq!(
+            snapshot_a.revision, snapshot_b.revision,
+            "fresh goals align revisions — digest inputs identical"
+        );
+        assert_eq!(snapshot_a.objective, snapshot_b.objective);
+
+        let provider_a = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "NOT_DONE: missing alpha",
+                usage: usage_of(2, 1, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let provider_b = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "NOT_DONE: missing beta",
+                usage: usage_of(2, 1, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let outcome_a = orch_a
+            .verify_goal_completion_bounded(
+                &session_a,
+                "tenant-a",
+                &snapshot_a,
+                provider_a,
+                "evidence-fixed",
+                Some(temp_a.path()),
+            )
+            .await;
+        let outcome_b = orch_b
+            .verify_goal_completion_bounded(
+                &session_b,
+                "tenant-a",
+                &snapshot_b,
+                provider_b,
+                "evidence-fixed",
+                Some(temp_b.path()),
+            )
+            .await;
+        assert_eq!(
+            outcome_a.kind.map(|k| k.as_str()),
+            Some("insufficient_evidence")
+        );
+        assert_eq!(
+            outcome_b.kind.map(|k| k.as_str()),
+            Some("insufficient_evidence")
+        );
+
+        // Scope-exact rows from EACH scope's own ledger file.
+        let rows_a = read_scope_ledger_rows(&temp_a, &session_a, "tenant-a", &snapshot_a);
+        let rows_b = read_scope_ledger_rows(&temp_b, &session_b, "tenant-a", &snapshot_b);
+        assert_eq!(rows_a.len(), 1, "one row in scope a's ledger");
+        assert_eq!(rows_b.len(), 1, "one row in scope b's ledger");
+        let row_a: serde_json::Value = serde_json::from_str(&rows_a[0]).expect("row a");
+        let row_b: serde_json::Value = serde_json::from_str(&rows_b[0]).expect("row b");
+
+        // Scopes DIFFER (different sessions + data dirs → different
+        // fingerprints)…
+        assert_ne!(
+            row_a["scope"], row_b["scope"],
+            "two isolated verifier scopes have distinct fingerprints"
+        );
+        // …the diagnostic payloads genuinely DIFFER…
+        assert!(
+            row_a["missing_evidence"]
+                .as_str()
+                .unwrap_or("")
+                .contains("alpha"),
+            "row a keeps its own diagnostic"
+        );
+        assert!(
+            row_b["missing_evidence"]
+                .as_str()
+                .unwrap_or("")
+                .contains("beta"),
+            "row b keeps its own diagnostic"
+        );
+        assert_ne!(
+            row_a["missing_evidence"], row_b["missing_evidence"],
+            "the two NOT_DONE reasons differ"
+        );
+        // …and the evidence digests are EQUAL: the digest keys on
+        // (objective, evidence, revision) only — never on scope, never on
+        // the missing_evidence diagnostic.
+        assert_eq!(
+            row_a["evidence_digest"], row_b["evidence_digest"],
+            "same objective+evidence+revision digests identically across \
+             scopes and across different diagnostics"
+        );
+
+        // In-scope replay proof: an identical call in scope a hits the SAME
+        // digest and replays (attempts 0, zero usage) — the alpha payload
+        // on the stored row did not perturb the key.
+        let provider_replay = ScriptedVerifierProvider::done();
+        let replay = orch_a
+            .verify_goal_completion_bounded(
+                &session_a,
+                "tenant-a",
+                &snapshot_a,
+                provider_replay,
+                "evidence-fixed",
+                Some(temp_a.path()),
+            )
+            .await;
+        assert!(
+            replay.replayed,
+            "identical inputs → identical digest → replay"
+        );
+        assert_eq!(replay.attempts, 0);
+        assert_eq!(replay.usage.input_tokens, 0);
+        let rows_a2 = read_scope_ledger_rows(&temp_a, &session_a, "tenant-a", &snapshot_a);
+        assert_eq!(rows_a2.len(), 1, "a replay appends no row");
     }
 
     /// Budget exhausted by the FIRST attempt's charge must prevent the
