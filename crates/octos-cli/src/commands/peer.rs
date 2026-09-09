@@ -69,7 +69,9 @@ pub(crate) struct PeerListRow {
     pub name: Option<String>,
     pub model_lane: Option<String>,
     /// Trusted-lifetime identity (anti cross-runtime/same-slug fencing);
-    /// null when the projection is untrusted.
+    /// null when the projection is untrusted — and also for the `closed`
+    /// branch, which intentionally reports identity-free (the closed marker
+    /// takes precedence over the projection; conservative contract).
     pub master_session_id: Option<String>,
     pub task_id: Option<String>,
     pub generation: Option<u64>,

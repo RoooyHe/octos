@@ -51,16 +51,21 @@ numbered results 终止证据。
   in-process inbox 直投的 round2 从 invalidate(Pending) 到 terminal 之间
   无 running 中间态（queued→terminal）。呈现按投影如实输出 queued，为
   已知限制记录于 interface 契约，不在本任务修 gateway 写侧。
-- crash 窗口语义：terminal 写入顺序为 lifetime(finish) → result.md →
-  result-<n>.md → turns.txt；进程在 finish 后、turns.txt append 前崩溃
-  时，呈现 running/queued + 旧 outcome 为可接受保守值，跨重启由
-  orphaned-across-restart 路径裁决；本任务不引入时间戳裁决（lifetime=Running
-  撞同轮 completed 证据同族，保守呈现 running）。
+- crash 窗口语义（写序以 ui_protocol_transport.rs 为准）：result.md →
+  lifetime(finish) → result-<n>.md → turns.txt。finish 前崩溃 →
+  投影仍 Running：跨重启恢复扫描不处理 Running（仅 closed 退休与
+  Idle 摘要重绑），孤儿 Running 保持 running 直到真实生命周期更新，
+  无自动降级、可长期呈 running。finish 后、
+  turns.txt append 前崩溃 → phase 已定（Idle/Pending/Failed），呈现
+  idle/queued/failed；last_outcome 依 turns 尾行 × 最高 result-<n>.md
+  互证——尾行未更新时为旧 outcome 或（双侧不一致时）null，不绝对
+  保留旧值。不引入时间戳裁决。
 - execution 派生（优先级；无可信 CURRENT authority 时 execution 恒
   unknown，turns.txt 只产出 last_outcome，不推导 execution）：
   1. `closed` 标记存在 → status=closed（不变），execution=`closed`（不是
      idle——closed 是生命周期终态，不代表上一执行成功），last_outcome 保留
-     turns.txt 证据值。
+     turns.txt 证据值；closed 分支身份四元组为 null（closed 标记优先于
+     投影，保守契约）。
   2. lifetime 投影可信 → Pending→`queued`、Running→`running`、
      Failed→`failed`、Idle→`idle`。
   3. lifetime 缺失或不可信（含 legacy）→ execution=`unknown`（turns.txt

@@ -13,7 +13,7 @@
     "authority_outcome": "peers/<slug>/turns.txt 最后一条 '<round> <outcome> <ts>'（与最高编号 result-<n>.md 互为印证）；result.md 正文不作成功证据",
     "lifecycle": "peers/<slug>/closed — 终态标记，status=closed 且 execution=closed（不代表上一执行成功，last_outcome 保留）"
   },
-  "identity_fields_note": "master_session_id/task_id/generation/turn_id 来自可信 lifetime 投影（master_session_id=lifetime.master）。消费端以 runtime/master_session_id/slug/task_id/generation/turn_id 关联，防跨 runtime/同 slug 串线；不可信或缺失时为 null。",
+  "identity_fields_note": "master_session_id/task_id/generation/turn_id 来自可信 lifetime 投影（master_session_id=lifetime.master）。消费端以 runtime/master_session_id/slug/task_id/generation/turn_id 关联，防跨 runtime/同 slug 串线。不可信或缺失时为 null；closed 分支同样全部 null（closed 标记优先于投影，身份不随 closed 保留——保守契约）。",
   "output_fields": {
     "slug": "String",
     "status": "running | done | closed — 不变：目录交付语义（done=result 文件存在）",
@@ -46,9 +46,10 @@
   "breaking_changes": "status 语义不变；人类表新增 CURRENT/OUTCOME/ROUNDS 列（脚本解析注意列数）；JSON 仅新增字段",
   "known_limitations": {
     "gateway_inbox_path": "session_actor.rs 的 gateway in-process inbox 直投路径无 begin_peer_lifetime_turn（代码事实核实 2026-09-09）：该路径 round2 从 queued 直达 terminal，无 running 中间态。呈现按投影如实输出。",
-    "crash_window": "terminal 写序 lifetime(finish)→result.md→result-<n>.md→turns.txt；finish 后 turns.txt append 前崩溃 → 呈现 running/queued+旧 outcome 的保守值，跨重启由 orphaned-across-restart 裁决；不用时间戳裁决。",
+    "crash_window": "真实写序（ui_protocol_transport.rs）：result.md → lifetime(finish_peer_lifetime_turn) → result-<n>.md → turns.txt。各点崩溃呈现：finish 前崩溃 → 投影仍 Running（孤儿 Running 语义见 begin_crash_orphan_running）；finish 后、turns append 前崩溃 → phase 已 Idle/Pending/Failed，呈现 idle/queued/failed，last_outcome 取决于 turns 尾行与最高 result-<n>.md 互证结果——尾行尚未更新时可能为旧 outcome 或 null（双侧不一致即 null），不绝对保留旧值。不用时间戳裁决。",
     "idle_no_turns": "lifetime=Idle 且 turns.txt 空（测试工厂可构造）→ execution=idle, last_outcome=null, round=0。合法组合。",
-    "digest_mismatch_test": "反例测试必须包含 nonempty 但不匹配的 digest（peer_list_idle_digest_mismatch_degrades_to_unknown）。"
+    "digest_mismatch_test": "反例测试必须包含 nonempty 但不匹配的 digest（peer_list_idle_digest_mismatch_degrades_to_unknown）。",
+    "begin_crash_orphan_running": "begin_peer_lifetime_turn 后、terminal 前崩溃 → 盘上残留 phase=Running。跨重启恢复扫描不处理 Running（仅 closed 退休与 Idle 摘要重绑）；孤儿 Running 保持 running 呈现直到真实生命周期更新，无自动降级，可能长期呈 running。"
   },
   "profile_resolution": "CLI：--profile <id>（默认 octos/DEFAULT_PROFILE_ID）显式传入投影校验；--data-dir 为任意合法路径，不从目录名推导 profile；serve 回调用已知 profile_id。",
   "idle_binding": "Idle 采信条件：fd-anchored 读 result.md 并计算 SHA256 与 lifetime.result_digest 实际相等；空白/错误/不匹配摘要或文件缺失 → unknown。仅比对摘要，不解析正文。",
