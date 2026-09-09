@@ -94,8 +94,11 @@ numbered results 终止证据。
 
 ### Allowed Changes
 - crates/octos-cli/src/commands/peer.rs
+- crates/octos-cli/src/commands/mod.rs（仅测试可见性 re-export）
 - crates/octos-cli/src/peers/mod.rs
+- crates/octos-cli/src/peers/recovery.rs（只读投影 + 真实 writer 回归测试；不改写侧语义）
 - crates/octos-cli/src/api/ui_protocol_transport.rs（仅限 raw_peer_gather/compose_peer_list_text 的只读投影扩展；不改 interrupt/steer/审批/terminal 写入行为）
+- crates/octos-cli/src/api/ui_protocol_tests.rs（既有 fixture 补字段）
 - specs/task-evo-peer-turn-status.spec.md
 - docs/superpowers/plans/2026-09-09-peer-turn-status.md
 - docs/peer-status-interface.json
@@ -240,6 +243,77 @@ Scenario: json 与 table 字段一致
   Given 上述 done+errored fixture
   When 分别以 --json 与表格渲染同一 rows
   Then JSON 含全部新字段，表格行含 CURRENT 与 OUTCOME 两列呈现（errored 原样显示；表映射 unknown→?、null→- 被断言）
+
+### Rule: real-writer-shapes — 真实 writer 形状回归（外层 probe 移植）
+Scenario: invalidate 保留旧 turn_id 的 Pending 仍可信（critical）
+  Test:
+    Package: octos-cli
+    Filter: outer_peer_projection_accepts_real_followup_pending
+  Given 生产 Fixture/begin/complete 后调用真实 invalidate_peer_lifetime_for_input
+  Then 磁盘呈 Pending+Some(旧turn_id) 且投影仍 Some（queued 权威保留，不降 unknown）
+
+Scenario: finish(queued) 产 Pending+Some 仍可信
+  Test:
+    Package: octos-cli
+    Filter: outer_peer_projection_accepts_finish_with_queued_input
+  Given 生产 finish_peer_lifetime_turn 以 has_queued_input=true 结束
+  Then 磁盘呈 Pending+Some 且投影仍 Some
+
+### Rule: entry-compat — 真实 CLI 入口兼容（外层复查 #2）
+Scenario: 仅 numbered result 的 legacy peer 保持 done
+  Test:
+    Package: octos-cli
+    Filter: peer_list_numbered_only_peer_stays_done
+  Given 一个 staged peer 仅有 result-1.md（无 bare result.md）
+  Then status=="done"（numbered 或 bare 任一存在即 done，旧语义不变）
+
+Scenario: 超 cap 的 bare result 仍证明交付
+  Test:
+    Package: octos-cli
+    Filter: peer_list_oversized_bare_result_still_done
+  Given bare result.md 超过读 cap（内容读失败）
+  Then status=="done" 且 rounds_delivered==1
+
+Scenario: 显式 name 等于 slug 仍保留 Some(name)
+  Test:
+    Package: octos-cli
+    Filter: peer_list_explicit_name_equal_to_slug_is_preserved
+  Given name 文件内容恰等于 slug
+  Then name==Some(slug 内容)（不得无故变 None）
+
+Scenario: 外来 slug frontmatter 不构成本 peer 证据
+  Test:
+    Package: octos-cli
+    Filter: peer_list_foreign_slug_frontmatter_is_not_outcome_evidence
+  Given result-1.md frontmatter slug 指向其他 peer 且 turns.txt 同轮 completed
+  Then last_outcome==null（交叉校验失败不主张）
+
+Scenario: 扫描 cap 触顶显式截断（scanner 级）
+  Test:
+    Package: octos-cli
+    Filter: peer_list_scan_cap_truncation_yields_no_outcome
+  Given 小 cap + 混合条目（result 文件与非 result 文件）耗尽扫描预算
+  Then 扫描器返回显式截断错误（不返回部分列表）；cap 足够时返回完整命中
+  And 预算计入全部扫描条目而非仅 result 命中（混合文件也耗尽预算）
+
+Scenario: 空 identity 字符串拒绝（Pending+Some("")、空 master）
+  Test:
+    Package: octos-cli
+    Filter: peer_projection_rejects_empty_identity_strings
+  Given lifetime.json 为 Pending+turn_id="" 或 master 为空白串
+  Then 投影为 None（不为其背书）
+
+Scenario: serve gather/list 入口按调用方 profile 投影（critical）
+  Test:
+    Package: octos-cli
+    Filter: peer_gather_entries_thread_caller_profile_for_lifetime
+  Given 非默认 profile（gatherx）的 staged peer 具有 registry_key 绑定
+    gatherx 的可信 running lifetime 及 round1 completed 终止证据
+  When 以 profile_id=gatherx 调 raw peer/gather RPC 与 peer_gather 工具回调
+  Then raw JSON execution=="running" 且
+    master_session_id/task_id/generation/turn_id/last_outcome 原样透出
+    （修复前默认 octos 读取会使同一盘面降级 unknown）；peer_gather 工具
+    回调与 peer_list 工具文本（exec=running）经同一 profile-aware 读取组文
 
 ## Out of Scope
 - lifetime.json / goal ledger 写侧语义变更（只读投影）。

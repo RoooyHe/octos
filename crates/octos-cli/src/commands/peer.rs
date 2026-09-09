@@ -34,69 +34,122 @@ pub struct PeerListArgs {
     /// Data-dir override (defaults to the standard resolution).
     #[arg(long, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
+    /// Profile id used to validate peer lifetime projections
+    /// (task-evo-peer-turn-status). The lifetime's registry_key must match
+    /// `<profile>:peer:<slug>`; the profile is NEVER derived from the
+    /// data-dir path. Defaults to the standard default profile ("octos").
+    #[arg(long, value_name = "ID")]
+    pub profile: Option<String>,
 }
 
-/// One peer row. Field names are part of the machine contract.
+/// One peer row. Field names are part of the machine contract
+/// (docs/peer-status-interface.json).
 #[derive(Debug, Serialize)]
 pub(crate) struct PeerListRow {
     pub slug: String,
     /// running | done | closed (a closed peer is reported even if results
     /// exist — closed is the terminal, operator-visible truth).
     pub status: String,
+    /// queued | running | idle | failed | closed | unknown — the CURRENT
+    /// execution state from the trusted lifetime projection (fail-closed;
+    /// unknown whenever no trusted authority exists).
+    pub execution: String,
+    /// completed | errored | interrupted | rate_limited | null — the most
+    /// recent TERMINATED round's outcome, from the strict terminal evidence
+    /// (turns.txt tail × highest result-<n>.md cross-check).
+    pub last_outcome: Option<String>,
+    /// Current round (queued/running: delivered+1; else the terminated
+    /// round's number).
+    pub round: u32,
+    /// Delivered rounds = count(result-<n>.md), floored at 1 for a bare
+    /// result.md (#2024).
+    pub rounds_delivered: u32,
     pub has_brief: bool,
     pub result_versions: u32,
     pub name: Option<String>,
     pub model_lane: Option<String>,
+    /// Trusted-lifetime identity (anti cross-runtime/same-slug fencing);
+    /// null when the projection is untrusted.
+    pub master_session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub generation: Option<u64>,
+    pub turn_id: Option<String>,
 }
 
 /// Assemble the peer list straight from the `peers/` directory. Symlinked
 /// or unstaged entries are skipped (same safety gate as serve's scans).
-pub(crate) fn list_peers(data_dir: &Path) -> Vec<PeerListRow> {
+/// `profile_id` validates the lifetime projection's registry_key — supplied
+/// EXPLICITLY by the caller (`--profile` / the resolved default), never
+/// derived from the data-dir path (task-evo-peer-turn-status).
+pub(crate) fn list_peers(data_dir: &Path, profile_id: &str) -> Vec<PeerListRow> {
+    // Single assembly: the CLI rows are a projection of the shared
+    // blackboard read (same source as serve's peer_list/peer_gather), so the
+    // three consumers can never drift.
+    let rows =
+        crate::peers::read_peer_blackboard_with_profile(&data_dir.join("peers"), None, profile_id);
     let peers_root = data_dir.join("peers");
-    let mut rows = Vec::new();
-    let Ok(read_dir) = std::fs::read_dir(&peers_root) else {
-        return rows; // no peers dir at all -> empty list, not an error
-    };
-    for entry in read_dir.flatten() {
-        let slug = entry.file_name().to_string_lossy().into_owned();
-        let Some(dir) = crate::peers::staged_peer_dir(&peers_root, &slug) else {
-            continue;
-        };
-        use crate::peers::peer_io as io;
-        let has_brief = io::peer_regular_file_exists(&dir, "brief.md");
-        if !has_brief {
-            continue; // not a staged peer (the staging contract)
-        }
-        let closed = io::peer_regular_file_exists(&dir, "closed");
-        let result_versions = crate::peers::count_peer_result_versions(&dir);
-        // A turn's latest finding lands in the bare `result.md`
-        // (overwritten per terminal); numbered `result-<n>.md` are older
-        // versions. Either proves delivery.
-        let has_result = result_versions > 0 || io::peer_regular_file_exists(&dir, "result.md");
-        let status = if closed {
-            "closed"
-        } else if has_result {
-            "done"
-        } else {
-            "running"
-        };
-        let name = io::read_peer_file(&dir, "name", io::PEER_FILE_READ_CAP_SMALL)
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        let model_lane = io::read_peer_file(&dir, "model", io::PEER_FILE_READ_CAP_SMALL)
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        rows.push(PeerListRow {
-            slug,
-            status: status.to_owned(),
-            has_brief,
-            result_versions,
-            name,
-            model_lane,
-        });
-    }
+    let mut rows: Vec<PeerListRow> = rows
+        .into_iter()
+        .map(|row| {
+            // RAW numbered-version count (the original `result_versions`
+            // contract: count(result-<n>.md) with NO #2024 floor) — kept
+            // distinct from `rounds_delivered`, which applies the floor.
+            let result_versions =
+                crate::peers::count_peer_result_versions(&peers_root.join(&row.slug));
+            // LEGACY status semantics, preserved EXACTLY (outer-loop
+            // review): done = a numbered result-<n>.md exists OR the bare
+            // result.md exists. The blackboard row's `result` field only
+            // carries the BARE file (an oversized/unreadable bare file
+            // yields None there but still proves delivery), so the version
+            // count participates too — a numbered-only peer must stay done.
+            let has_result = row.execution_facet.rounds_delivered > 0 || row.result.is_some();
+            let status = if row.closed {
+                "closed"
+            } else if has_result {
+                "done"
+            } else {
+                "running"
+            };
+            // name: the ORIGINAL optional-name semantics — Some only when a
+            // non-empty `name` file was recorded (including content == slug,
+            // the operator's explicit choice); None when absent/empty. The
+            // blackboard collapses a missing name onto the slug for
+            // ADDRESSING; the CLI contract keeps the distinction.
+            let raw_name = crate::peers::peer_io::read_peer_file(
+                &peers_root.join(&row.slug),
+                "name",
+                crate::peers::peer_io::PEER_FILE_READ_CAP_SMALL,
+            )
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty());
+            PeerListRow {
+                slug: row.slug.clone(),
+                status: status.to_owned(),
+                execution: row.execution_facet.execution.to_owned(),
+                last_outcome: row.execution_facet.last_outcome,
+                round: row.execution_facet.round,
+                rounds_delivered: row.execution_facet.rounds_delivered,
+                has_brief: true,
+                result_versions,
+                name: raw_name,
+                model_lane: row.model_lane,
+                master_session_id: row.execution_facet.master_session_id,
+                task_id: row.execution_facet.task_id,
+                generation: row.execution_facet.generation,
+                turn_id: row.execution_facet.turn_id,
+            }
+        })
+        .collect();
     rows.sort_by(|a, b| a.slug.cmp(&b.slug));
     rows
+}
+
+/// Test-visible alias for [`list_peers`] — the module is private to
+/// `commands`, but the peers-module contract tests need the REAL CLI
+/// assembly (status semantics + name preservation) over real dirs.
+#[cfg(test)]
+pub(crate) fn peer_list_for_test(data_dir: &Path, profile_id: &str) -> Vec<PeerListRow> {
+    list_peers(data_dir, profile_id)
 }
 
 fn print_table(rows: &[PeerListRow]) {
@@ -104,13 +157,27 @@ fn print_table(rows: &[PeerListRow]) {
         println!("(no staged peers)");
         return;
     }
-    println!("{:<24} {:<8} {:<8} NAME", "SLUG", "STATUS", "RESULTS");
+    println!(
+        "{:<24} {:<8} {:<8} {:<12} {:<7} NAME",
+        "SLUG", "STATUS", "CURRENT", "OUTCOME", "ROUNDS"
+    );
     for row in rows {
+        // Table rendering maps (interface contract): unknown execution shows
+        // "?", a null outcome shows "-" — both asserted by the shared-
+        // assembly test.
+        let execution = if row.execution == "unknown" {
+            "?".to_owned()
+        } else {
+            row.execution.clone()
+        };
+        let outcome = row.last_outcome.clone().unwrap_or_else(|| "-".to_owned());
         println!(
-            "{:<24} {:<8} {:<8} {}",
+            "{:<24} {:<8} {:<8} {:<12} {:<7} {}",
             row.slug,
             row.status,
-            row.result_versions,
+            execution,
+            outcome,
+            row.rounds_delivered,
             row.name.as_deref().unwrap_or("-")
         );
     }
@@ -121,10 +188,21 @@ impl Executable for PeerCommand {
         match self.action {
             PeerAction::List(args) => {
                 // 整改: shared per-instance profile data root (see goal.rs).
+                // task-evo-peer-turn-status: the profile id for lifetime
+                // projection validation comes from --profile (explicit) or
+                // the default — NEVER derived from the data-dir path. The
+                // SAME id also drives the data-root resolution, so
+                // `--profile octosfix` without --data-dir reads the octosfix
+                // profile's directory (outer-loop review: passing the
+                // constant here made --profile a no-op for resolution).
+                let profile_id = args
+                    .profile
+                    .clone()
+                    .unwrap_or_else(|| super::obs::DEFAULT_PROFILE_ID.to_owned());
                 let data_dir = super::obs::resolve_profile_data_root(
                     &super::resolve_data_dir(None)?,
                     &std::env::current_dir()?,
-                    super::obs::DEFAULT_PROFILE_ID,
+                    &profile_id,
                 );
                 let data_dir = args.data_dir.unwrap_or(data_dir);
                 // 整改要求 2: a missing peers dir is an ERROR with the
@@ -146,7 +224,7 @@ impl Executable for PeerCommand {
                     }
                     std::process::exit(1);
                 }
-                let rows = list_peers(&data_dir);
+                let rows = list_peers(&data_dir, &profile_id);
                 if args.json {
                     println!("{}", serde_json::to_string(&rows).expect("peers json"));
                 } else {
@@ -186,7 +264,7 @@ mod tests {
         // unstaged junk: no brief -> skipped
         std::fs::create_dir_all(temp.path().join("peers").join("junk")).expect("junk");
 
-        let rows = list_peers(temp.path());
+        let rows = list_peers(temp.path(), "octos");
         assert_eq!(rows.len(), 3);
         let by_slug = |s: &str| rows.iter().find(|r| r.slug == s).expect("row");
         assert_eq!(by_slug("alpha").status, "running");
@@ -204,7 +282,7 @@ mod tests {
     #[test]
     fn olp_obs_peer_list_empty_dir_is_empty_array() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let rows = list_peers(temp.path());
+        let rows = list_peers(temp.path(), "octos");
         assert!(rows.is_empty());
         assert_eq!(serde_json::to_string(&rows).expect("json"), "[]");
     }
