@@ -4963,7 +4963,7 @@ impl InProcessAgentOrchestrator {
         // still active after the previous per-attempt charge.
         let mut attempts: u32 = 0;
         let mut usage = octos_llm::TokenUsage::default();
-        let (verdict, outcome_kind, missing_evidence, call_error);
+        let (verdict, outcome_kind, missing_evidence, call_error, record_reason);
         loop {
             attempts += 1;
             let call = run_goal_completion_verifier_with_usage(
@@ -4992,10 +4992,24 @@ impl InProcessAgentOrchestrator {
             if retry {
                 continue;
             }
+            // PR-2273 P2-③: an InvalidResponse verdict carries its bounded
+            // raw-quote reason ONLY in `NotDone.reason`. Persist it into
+            // the NEW `reason` column (ROOT #1: NOT `missing_evidence` —
+            // that field keeps its parser semantics and stuffing a
+            // protocol error there would disguise it as missing evidence).
+            // The reader prefers `reason`, then falls back to the v3
+            // legacy columns (missing_evidence → error → outcome).
+            record_reason = match (&call.verdict, call.kind) {
+                (
+                    GoalCompletionVerdict::NotDone { reason },
+                    Some(crate::autonomy::goal_loop_runtime::GoalVerifierFailureKind::InvalidResponse),
+                ) => Some(reason.clone()),
+                _ => None,
+            };
+            call_error = call.call_error;
             verdict = call.verdict;
             outcome_kind = call.kind;
             missing_evidence = call.missing_evidence;
-            call_error = call.call_error;
             break;
         }
 
@@ -5021,6 +5035,7 @@ impl InProcessAgentOrchestrator {
                     attempts,
                     usage: usage.clone(),
                     missing_evidence: missing_evidence.clone(),
+                    reason: record_reason.clone(),
                     error: call_error.clone(),
                     evidence_digest: digest.clone(),
                     replayed: false,
@@ -5289,10 +5304,16 @@ impl InProcessAgentOrchestrator {
                 let verdict = if kind.is_none() {
                     GoalCompletionVerdict::Done
                 } else {
+                    // PR-2273 P2-③ reader: prefer the persisted bounded
+                    // `reason` (new rows), then the v3 legacy fallbacks —
+                    // missing_evidence (insufficient_evidence rows),
+                    // error (call_failed rows), bare outcome (old
+                    // invalid_response rows carry no detail).
                     GoalCompletionVerdict::NotDone {
                         reason: record
-                            .missing_evidence
+                            .reason
                             .clone()
+                            .or_else(|| record.missing_evidence.clone())
                             .or_else(|| record.error.clone())
                             .unwrap_or_else(|| record.outcome.clone()),
                     }
@@ -16401,7 +16422,16 @@ objective is fully met, or `NOT_DONE: <short reason>` otherwise."
                 .filter_map(|cause| cause.downcast_ref::<octos_llm::LlmError>())
                 .next()
                 .is_some_and(|llm| llm.is_retryable());
-            let text = error.to_string();
+            // PR-2273 P2-②: ONE bounded, Unicode-safe error string feeds
+            // BOTH the NotDone reason and `call_error` — the pre-fix path
+            // pushed the UNTRUNCATED `error.to_string()` into the reason
+            // (only call_error was truncated), leaking an unbounded
+            // multi-byte error into UI/tool/persisted surfaces.
+            let text: String = error
+                .to_string()
+                .chars()
+                .take(VERIFIER_CALL_ERROR_CHARS)
+                .collect();
             SingleVerifierCall {
                 verdict: GoalCompletionVerdict::NotDone {
                     reason: format!("verifier call failed: {text}"),
@@ -16409,7 +16439,7 @@ objective is fully met, or `NOT_DONE: <short reason>` otherwise."
                 kind: Some(crate::autonomy::goal_loop_runtime::GoalVerifierFailureKind::CallFailed),
                 missing_evidence: None,
                 call_error_retryable: retryable,
-                call_error: Some(text.chars().take(VERIFIER_CALL_ERROR_CHARS).collect()),
+                call_error: Some(text),
                 usage: octos_llm::TokenUsage::default(),
             }
         }
@@ -16497,6 +16527,13 @@ pub(crate) struct VerifierLedgerRecord {
     pub usage: octos_llm::TokenUsage,
     #[serde(default)]
     pub missing_evidence: Option<String>,
+    /// PR-2273 P2-③: bounded NotDone reason (currently written for
+    /// InvalidResponse so a restart replays the raw-quote detail instead
+    /// of the bare enum string). `serde(default)` keeps pre-existing v3
+    /// rows deserializable; the reader prefers this over the legacy
+    /// missing_evidence/error/outcome fallbacks.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// Truncated provider error (call_failed only).
     #[serde(default)]
     pub error: Option<String>,
@@ -16582,27 +16619,74 @@ fn verifier_scope_fingerprint(
 /// anchor is unreadable) — fail-safe: two texts that differ simply never
 /// share a ledger.
 fn verifier_storage_identity(data_dir: &std::path::Path) -> String {
+    // Storage identity for the verifier ledger scope: the SAME directory
+    // must yield the SAME identity across every spelling, before AND after
+    // the preflight creates missing components:
+    //   plain `a/b`, `./a/b`, missing-tail `a/new/../b`, tails climbing
+    //   above the missing pieces, and symlinked components (which must
+    // keep OS resolution — a `..` that lands back on an EXISTING dir
+    // resumes canonicalization from there).
+    //
+    // Algorithm: anchor, walk up to the deepest EXISTING ancestor via
+    // `canonicalize`, then replay the collected missing components
+    // outermost-first onto the canonical anchor — pushing each `Normal`
+    // and IMMEDIATELY canonicalizing the candidate (so a component that
+    // already exists — e.g. a symlink created between calls, or a `..`
+    // that returns to existing territory — resolves through the OS),
+    // popping the candidate on `ParentDir`, and skipping `CurDir`.
+    // `PathBuf::pop` on an absolute candidate stops at the root, so a
+    // `..` past the anchor can never climb above it.
+    let anchored = if data_dir.is_absolute() {
+        data_dir.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(data_dir),
+            // No cwd (extreme sandbox): identical fallback on every call,
+            // so the identity is still stable.
+            Err(_) => data_dir.to_path_buf(),
+        }
+    };
+    // Collected innermost-first while walking up to the existing anchor.
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = data_dir.to_path_buf();
-    loop {
-        match cursor.canonicalize() {
-            Ok(mut canon) => {
-                for part in tail.iter().rev() {
-                    canon.push(part);
-                }
-                return canon.to_string_lossy().into_owned();
-            }
-            Err(_) => {
-                let Some(file_name) = cursor.file_name().map(|n| n.to_os_string()) else {
-                    return data_dir.to_string_lossy().into_owned();
-                };
-                tail.push(file_name);
-                if !cursor.pop() {
-                    return data_dir.to_string_lossy().into_owned();
-                }
-            }
+    let mut cursor = anchored.clone();
+    let mut canon: std::path::PathBuf = loop {
+        if let Ok(c) = cursor.canonicalize() {
+            break c;
+        }
+        let Some(back) = cursor.components().next_back() else {
+            // Nothing left to walk: keep the anchored text (stable).
+            return anchored.to_string_lossy().into_owned();
+        };
+        use std::path::Component;
+        match back {
+            Component::Normal(name) => tail.push(name.to_os_string()),
+            Component::CurDir => tail.push(".".to_owned().into()),
+            Component::ParentDir => tail.push("..".to_owned().into()),
+            // Root/Prefix terminate the walk at the filesystem root.
+            _ => break cursor.clone(),
+        }
+        if !cursor.pop() {
+            return anchored.to_string_lossy().into_owned();
+        }
+    };
+    // Replay outermost-first (tail was collected innermost-first).
+    for part in tail.iter().rev() {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            canon.pop();
+            continue;
+        }
+        canon.push(part);
+        // A component that exists NOW (symlink or real dir created since
+        // the walk, or a `..` that returned to existing territory) must
+        // resolve through the OS, not stay lexical.
+        if let Ok(resolved) = canon.canonicalize() {
+            canon = resolved;
         }
     }
+    canon.to_string_lossy().into_owned()
 }
 
 /// REAL per-scope single-flight (outer defect ①): a process-wide registry
@@ -39772,6 +39856,547 @@ mod tests {
         assert_eq!(outcome.usage.reasoning_tokens, 33, "3 + 30");
         assert_eq!(outcome.usage.cache_read_tokens, 44, "4 + 40");
         assert_eq!(outcome.usage.cache_write_tokens, 55, "5 + 50");
+    }
+
+    /// PR-2273 P2-③ (ROOT #1 compat): a v3 ledger row written BEFORE the
+    /// `reason` column existed (invalid_response, no reason field) must
+    /// still deserialize and replay via the legacy outcome fallback — the
+    /// new reader prefers `reason` but never breaks old rows.
+    #[tokio::test]
+    async fn goal_verifier_old_v3_row_without_reason_still_replays() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: SessionKey::with_profile("tenant-a", "api", "iv-old-v3-anchor"),
+                profile_id: "tenant-a".into(),
+                objective: "throwaway id anchor".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("throwaway goal (id anchor)");
+        let session_id = SessionKey::with_profile("tenant-a", "api", "iv-old-v3");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "old v3 row".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        // Run ONE live call so the ledger file + scope fingerprint exist,
+        // then hand-rewrite the row into the PRE-reason v3 shape.
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "DONE: but never actually finished",
+                usage: usage_of(4, 2, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let _ = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider,
+                "evidence-old",
+                Some(temp.path()),
+            )
+            .await;
+        let rows = read_scope_ledger_rows(&temp, &session_id, "tenant-a", &snapshot);
+        assert_eq!(rows.len(), 1);
+        let mut row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row");
+        // Strip the new column AND the detail columns — a true old-v3 row.
+        row.as_object_mut().expect("obj").remove("reason");
+        row.as_object_mut().expect("obj").remove("missing_evidence");
+        row.as_object_mut().expect("obj").remove("error");
+        let scope_fp = row["scope"].as_str().expect("scope").to_owned();
+        let ledger_path = verifier_ledger_path(temp.path(), &scope_fp);
+        std::fs::write(&ledger_path, format!("{row}\n")).expect("rewrite old-v3 row");
+
+        // Fresh orchestrator (restart) with id parity reads the old row:
+        // deserializes (serde default), replays invalid_response with the
+        // legacy bare-outcome fallback text.
+        let restarted = InProcessAgentOrchestrator::default();
+        restarted
+            .set_goal(GoalSetRequest {
+                session_id: SessionKey::with_profile("tenant-a", "api", "iv-old-v3-anchor"),
+                profile_id: "tenant-a".into(),
+                objective: "throwaway id anchor".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("throwaway goal (id anchor)");
+        restarted
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "old v3 row".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot2 = restarted
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot2");
+        assert_eq!(snapshot2.goal_id, snapshot.goal_id, "id parity");
+        let provider2 = ScriptedVerifierProvider::done();
+        let outcome = restarted
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot2,
+                provider2,
+                "evidence-old",
+                Some(temp.path()),
+            )
+            .await;
+        assert!(outcome.replayed, "old v3 row replays");
+        assert_eq!(outcome.kind.map(|k| k.as_str()), Some("invalid_response"));
+        assert_eq!(
+            outcome.not_done_reason(),
+            Some("invalid_response"),
+            "legacy fallback text for a detail-less old row"
+        );
+    }
+
+    /// PR-2273 P2-①: storage identity must be STABLE across the
+    /// preflight-creates-the-directory transition. A NONEXISTING RELATIVE
+    /// data_dir under a real cwd previously resolved to the raw relative
+    /// string on first use, then to an ABSOLUTE canonical path after
+    /// preflight created it — two identities, so scope/mutex/cache/ledger
+    /// all split and the same evidence paid a fresh provider call.
+    #[tokio::test]
+    async fn goal_verifier_storage_identity_stable_across_relative_dir_creation() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "rel-dir");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "relative dir stability".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+
+        // A nonexistent RELATIVE path under the CURRENT cwd — WITHOUT
+        // touching the process cwd (ROOT: set_current_dir pollutes the
+        // parallel whole-repo test run). Reserve a unique basename by
+        // creating the guard directory IN the cwd (so its Drop actually
+        // cleans the re-created path), remember the basename, remove the
+        // empty guard dir we just made, then use `<basename>/nested` as
+        // the relative data_dir. No cwd garbage survives panic or success.
+        let cwd = std::env::current_dir().expect("cwd");
+        let guard = tempfile::Builder::new()
+            .prefix(".verifier-relative-")
+            .tempdir_in(&cwd)
+            .expect("guard dir in cwd");
+        let basename = guard
+            .path()
+            .file_name()
+            .expect("guard basename")
+            .to_os_string();
+        std::fs::remove_dir(guard.path()).expect("remove empty guard dir");
+        let relative = std::path::PathBuf::from(&basename).join("nested");
+        assert!(
+            !relative.exists(),
+            "precondition: relative path does not exist yet"
+        );
+
+        // First identity BEFORE creation, second AFTER preflight created it.
+        let identity_before = verifier_storage_identity(&relative);
+        let provider = ScriptedVerifierProvider::done();
+        let _first = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence-rel",
+                Some(&relative),
+            )
+            .await;
+        assert!(
+            relative.exists(),
+            "preflight created the missing relative directory"
+        );
+        let identity_after = verifier_storage_identity(&relative);
+        assert_eq!(
+            identity_before, identity_after,
+            "storage identity must not change when preflight creates the dir"
+        );
+
+        // PR-2273 follow-up (ROOT probe `new/../other`): a missing tail
+        // containing `..` must collapse to the SAME identity before and
+        // after creation — first call creates `<cwd>/other-tail`, and the
+        // `..`-spelled path agrees on every call thereafter.
+        let guard2 = tempfile::Builder::new()
+            .prefix(".verifier-relative-")
+            .tempdir_in(&cwd)
+            .expect("guard dir 2");
+        let base2 = guard2
+            .path()
+            .file_name()
+            .expect("basename 2")
+            .to_os_string();
+        std::fs::remove_dir(guard2.path()).expect("remove empty guard 2");
+        let dotted = std::path::PathBuf::from(&base2).join("new/../other");
+        let identity_dotted_before = verifier_storage_identity(&dotted);
+        let plain = std::path::PathBuf::from(&base2).join("other");
+        std::fs::create_dir_all(&plain).expect("create plain target");
+        let identity_plain = verifier_storage_identity(&plain);
+        assert_eq!(
+            identity_dotted_before, identity_plain,
+            "`..` over missing pieces collapses to the plain identity"
+        );
+        // After the dotted path exists (via the plain target), the dotted
+        // spelling still agrees — no drift post-creation.
+        let identity_dotted_after = verifier_storage_identity(&dotted);
+        assert_eq!(identity_dotted_after, identity_plain);
+
+        // Positive: an EXISTING symlinked ancestor keeps OS resolution —
+        // two spellings of the same real dir share one identity.
+        // (Unix-only: std::os::unix::fs::symlink.)
+        #[cfg(unix)]
+        {
+            let guard3 = tempfile::Builder::new()
+                .prefix(".verifier-relative-")
+                .tempdir_in(&cwd)
+                .expect("guard dir 3");
+            let real = guard3.path().join("real-dir");
+            std::fs::create_dir_all(&real).expect("real dir");
+            let link = guard3.path().join("link-dir");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            let via_real = verifier_storage_identity(&real);
+            let via_link = verifier_storage_identity(&link);
+            assert_eq!(
+                via_real, via_link,
+                "existing symlinked ancestors resolve to one identity"
+            );
+            // existing-symlink + `..`: per POSIX path resolution, `..` binds
+            // to the path-lexical parent (link/sub/.. == link), and the FINAL
+            // component then resolves through the symlink — so
+            // link/sub/../leaf ≡ link/leaf ≡ real-dir/leaf.
+            let via_link_dotdot = verifier_storage_identity(&link.join("sub/../leaf"));
+            let via_link_leaf = verifier_storage_identity(&link.join("leaf"));
+            let via_real_leaf = verifier_storage_identity(&real.join("leaf"));
+            assert_eq!(
+                via_link_dotdot, via_link_leaf,
+                "`..` binds to the path-lexical parent (link/sub/.. == link)"
+            );
+            assert_eq!(
+                via_link_leaf, via_real_leaf,
+                "the leaf resolves through the symlink to the real dir"
+            );
+
+            // ── ROOT probe matrix: every spelling stable pre/post creation ──
+            let guard4 = tempfile::Builder::new()
+                .prefix(".verifier-relative-")
+                .tempdir_in(&cwd)
+                .expect("guard dir 4");
+            let base4 = guard4
+                .path()
+                .file_name()
+                .expect("basename 4")
+                .to_os_string();
+            std::fs::remove_dir(guard4.path()).expect("remove empty guard 4");
+            let mk = |spelling: &str| std::path::PathBuf::from(&base4).join(spelling);
+            // (spelling, equivalent plain form) pairs.
+            let cases: Vec<(&str, String)> = vec![
+                ("plain/x/y", "plain/x/y".to_owned()),
+                ("./cur/x", "cur/x".to_owned()),
+                ("dd/new/../other", "dd/other".to_owned()),
+                ("deep/a/b/../../../shallow", "shallow".to_owned()),
+            ];
+            for (spelling, plain_eq) in &cases {
+                let dotted = mk(spelling);
+                let before = verifier_storage_identity(&dotted);
+                // Create through the DOTTED spelling itself — a real
+                // creation the preflight would perform — then compare BOTH
+                // spellings' identities against it.
+                std::fs::create_dir_all(&dotted).expect("create via dotted spelling");
+                assert!(dotted.exists(), "dotted path really exists now");
+                let after_dotted = verifier_storage_identity(&dotted);
+                assert_eq!(
+                    before, after_dotted,
+                    "spelling {spelling:?} stable across creation via itself"
+                );
+                let plain_path = mk(plain_eq);
+                assert!(plain_path.exists(), "plain equivalent reached");
+                let plain_identity = verifier_storage_identity(&plain_path);
+                assert_eq!(
+                    after_dotted, plain_identity,
+                    "spelling {spelling:?} and plain {plain_eq:?} share one identity"
+                );
+                // Clean the case dir so later cases start fresh under base4.
+                let _ = std::fs::remove_dir_all(mk(spelling.split('/').next().unwrap_or("")));
+                let _ = std::fs::remove_dir_all(&plain_path);
+            }
+            std::fs::create_dir_all(mk("shallow")).expect("recreate for cleanup guard");
+        }
+
+        // ── v2 probe regression (ROOT 2273-tail-v2-path-probes.json case 7):
+        // `new/../link/fresh` where `link` is an EXISTING symlink to a
+        // real dir. The `..` collapses over the MISSING `new`, landing on
+        // the guard base — an EXISTING dir — after which the symlink MUST
+        // resolve through the OS: identity == target/inner/fresh, and it
+        // must be STABLE across creation of `fresh` in the target.
+        #[cfg(unix)]
+        {
+            let guard5 = tempfile::Builder::new()
+                .prefix(".verifier-relative-")
+                .tempdir_in(&cwd)
+                .expect("guard dir 5");
+            let real5 = guard5.path().join("target/inner");
+            std::fs::create_dir_all(&real5).expect("real target dir");
+            let link5 = guard5.path().join("link");
+            std::os::unix::fs::symlink(&real5, &link5).expect("symlink 5");
+            let dotted5 = guard5.path().join("new/../link/fresh");
+            let before5 = verifier_storage_identity(&dotted5);
+            let direct5 = real5.join("fresh");
+            std::fs::create_dir_all(&direct5).expect("create fresh in target");
+            let after5 = verifier_storage_identity(&dotted5);
+            let direct_identity5 = verifier_storage_identity(&direct5);
+            assert_eq!(
+                before5, direct_identity5,
+                "`..` back onto an existing dir must resume OS resolution through the symlink"
+            );
+            assert_eq!(after5, direct_identity5, "stable after creation");
+            // And a FURTHER `..` after the symlink-resolved component climbs
+            // the RESOLVED target (`target/inner`), not the symlink's parent.
+            let dotted6 = guard5.path().join("new/../link/fresh/../top");
+            let via_target = verifier_storage_identity(&real5.join("top"));
+            let dotted6_identity = verifier_storage_identity(&dotted6);
+            assert_eq!(
+                dotted6_identity, via_target,
+                "`..` after a resolved symlink climbs the resolved parent"
+            );
+        }
+
+        // Second identical call with the SAME relative path must REPLAY the
+        // first verdict (durable replay, zero provider chats).
+        let second = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence-rel",
+                Some(&relative),
+            )
+            .await;
+        assert_eq!(provider.chats(), 1, "no second provider call");
+        assert!(second.replayed, "same identity ⇒ durable replay");
+        // The guard's Drop removes whatever preflight re-created under the
+        // basename; nothing here mutates the process cwd.
+        let _ = guard;
+    }
+
+    /// PR-2273 P2-②: the CallFailed NotDone reason itself must be the
+    /// bounded, Unicode-safe error string — the pre-fix path pushed the
+    /// UNTRUNCATED `error.to_string()` into `NotDone.reason` (only
+    /// `call_error` was truncated), so a multi-byte provider error longer
+    /// than the cap leaked an unbounded reason into UI/tool/persisted
+    /// surfaces.
+    #[tokio::test]
+    async fn goal_verifier_call_failed_reason_is_bounded_unicode_safe() {
+        struct LongMultibyteErrorProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for LongMultibyteErrorProvider {
+            async fn chat(
+                &self,
+                _m: &[octos_core::Message],
+                _t: &[octos_llm::ToolSpec],
+                _c: &octos_llm::ChatConfig,
+            ) -> eyre::Result<octos_llm::ChatResponse> {
+                // 600 emoji, each 4 bytes — far past VERIFIER_CALL_ERROR_CHARS.
+                Err(eyre::eyre!("{}", "💡".repeat(600)))
+            }
+            fn model_id(&self) -> &str {
+                "long-error"
+            }
+            fn provider_name(&self) -> &str {
+                "long-error"
+            }
+        }
+
+        let orchestrator = InProcessAgentOrchestrator::default();
+        let session_id = SessionKey::with_profile("tenant-a", "api", "bounded-reason");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "bounded reason".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let outcome = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                std::sync::Arc::new(LongMultibyteErrorProvider),
+                "evidence",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(outcome.kind.map(|k| k.as_str()), Some("call_failed"));
+        let reason = outcome.not_done_reason().expect("reason present");
+        let reason_chars = reason.chars().count();
+        // The reason may carry a short prefix ("verifier call failed: ")
+        // around the bounded error, but the WHOLE line stays bounded and
+        // every char is a valid char boundary (no panic, no mojibake).
+        assert!(
+            reason_chars <= VERIFIER_CALL_ERROR_CHARS + 64,
+            "reason must be bounded, got {reason_chars} chars"
+        );
+        assert!(
+            reason.chars().all(|c| c == '💡' || !c.is_control()),
+            "no mangled multi-byte artifacts"
+        );
+    }
+
+    /// PR-2273 P2-③: an InvalidResponse verdict must persist its bounded
+    /// raw-quote reason and REPLAY it after a restart — the pre-fix ledger
+    /// row stored only `outcome=invalid_response` with no reason, so a
+    /// read-back produced the bare enum string instead of the diagnostic
+    /// detail. v3 old rows (no reason field) must stay readable via the
+    /// existing fallback.
+    #[tokio::test]
+    async fn goal_verifier_invalid_response_reason_persists_and_replays() {
+        let orchestrator = InProcessAgentOrchestrator::default();
+        // Deterministic goal-id alignment for restart parity: ids are
+        // minted sequentially per orchestrator (goal_01, goal_02, …), so a
+        // throwaway goal occupies goal_01 on BOTH orchestrators and the
+        // session under test lands on goal_02 with an identical id — the
+        // scope fingerprint (which includes goal_id) then matches across
+        // the restart.
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: SessionKey::with_profile("tenant-a", "api", "iv-throwaway"),
+                profile_id: "tenant-a".into(),
+                objective: "throwaway id anchor".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set throwaway goal (id anchor)");
+        let session_id = SessionKey::with_profile("tenant-a", "api", "iv-reason");
+        orchestrator
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "persist invalid reason".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal");
+        let snapshot = orchestrator
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot");
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        let provider = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "DONE: but the tests were never green",
+                usage: usage_of(4, 2, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let first = orchestrator
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot,
+                provider.clone(),
+                "evidence-iv",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(first.kind.map(|k| k.as_str()), Some("invalid_response"));
+        assert!(!first.replayed);
+
+        // Durability: a FRESH orchestrator over the same data dir (restart
+        // semantics) replays the SAME verdict — with the bounded raw-quote
+        // reason intact, and NO new provider call.
+        let restarted = InProcessAgentOrchestrator::default();
+        restarted
+            .set_goal(GoalSetRequest {
+                session_id: SessionKey::with_profile("tenant-a", "api", "iv-throwaway"),
+                profile_id: "tenant-a".into(),
+                objective: "throwaway id anchor".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set throwaway goal (id anchor)");
+        restarted
+            .set_goal(GoalSetRequest {
+                session_id: session_id.clone(),
+                profile_id: "tenant-a".into(),
+                objective: "persist invalid reason".into(),
+                status: Some("active".into()),
+                token_budget: None,
+                transition_actor: None,
+            })
+            .expect("set active goal (same id semantics under fresh state)");
+        let snapshot2 = restarted
+            .goal_verification_snapshot(&session_id, "tenant-a")
+            .expect("snapshot after restart");
+        assert_eq!(
+            snapshot2.goal_id, snapshot.goal_id,
+            "restart parity: same goal id ⇒ same scope fingerprint"
+        );
+        let provider2 = Arc::new(ScriptedVerifierProvider {
+            replies: StdMutex::new(vec![ScriptedReply::Ok {
+                content: "DONE",
+                usage: usage_of(1, 1, 0, 0, 0),
+            }]),
+            chats: std::sync::atomic::AtomicU32::new(0),
+        });
+        let replayed = restarted
+            .verify_goal_completion_bounded(
+                &session_id,
+                "tenant-a",
+                &snapshot2,
+                provider2.clone(),
+                "evidence-iv",
+                Some(temp.path()),
+            )
+            .await;
+        assert_eq!(
+            provider2.chats(),
+            0,
+            "durable replay after restart must not call the provider"
+        );
+        assert!(replayed.replayed, "durable replay after restart");
+        assert_eq!(replayed.kind.map(|k| k.as_str()), Some("invalid_response"));
+        let reason = replayed.not_done_reason().expect("reason replayed");
+        assert!(
+            reason.contains("DONE: but the tests were never green"),
+            "the bounded raw quote must survive the restart, got: {reason}"
+        );
     }
 
     /// Test util: read the EXACT ledger file for a session's verifier

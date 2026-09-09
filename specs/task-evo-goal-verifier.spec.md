@@ -376,6 +376,40 @@ Scenario: ui_protocol_transport 两处 sentinel 调用点绑定
   When 验证完成
   Then 两路径均不置 Completed，NotDone reason 含 call_failed 分类与 attempt 次数
 
+### Rule: pr-2273-storage-identity-stability — 相对 data_dir 首建前后 scope 身份稳定
+
+Scenario: 不存在相对路径经 cwd 锚定后身份跨创建稳定
+  Test:
+    Package: octos-cli
+    Filter: goal_verifier_storage_identity_stable_across_relative_dir_creation
+  Given 真实 cwd 下不存在相对 data_dir（唯一 basename guard，不改进程 cwd；拼写矩阵含 plain、./、new/../other、a/b/../../../shallow、missing/../existing-link/fresh 及其后再 ../，unix-only symlink 探针以 #[cfg(unix)] 隔离）
+  When 首次调用触发 preflight 创建目录
+  Then 每种拼写创建前后 verifier_storage_identity 相同且等于其 plain 等价形；.. 回到现存目录后 symlink 经 OS 解析（.. 爬已解析 target 父级而非 symlink 父级）；同 evidence 第二次调用 durable replay 且 provider 只调 1 次
+
+Scenario: CallFailed reason 有界 Unicode 安全
+  Test:
+    Package: octos-cli
+    Filter: goal_verifier_call_failed_reason_is_bounded_unicode_safe
+  Given provider 返回 600 个多字节 emoji 错误
+  When verifier 调用失败
+  Then NotDone.reason 与 call_error 同一有界字符串（chars 截断，无乱码/panic）
+
+Scenario: InvalidResponse reason 持久化并跨重启重放
+  Test:
+    Package: octos-cli
+    Filter: goal_verifier_invalid_response_reason_persists_and_replays
+  Given InvalidResponse 判词落账（新 reason 列，非 missing_evidence）
+  When 新 orchestrator（重启语义，同 goal id）读同 evidence
+  Then replay 携带有界原文引述，provider 0 次调用
+
+Scenario: 旧 v3 无 reason 行兼容回退
+  Test:
+    Package: octos-cli
+    Filter: goal_verifier_old_v3_row_without_reason_still_replays
+  Given 预 reason 列时代的 v3 invalid_response 行（无 reason/missing_evidence/error）
+  When 重启后读取
+  Then 反序列化成功并按 legacy 裸 outcome 回退重放
+
 ## Out of Scope
 
 - 不改 max_tokens=2048；不重构 profile/sub-provider 解析；不动 goal 预算语义（allow_budget_limited=true 保留）；不写主树/其他任务目录；不改权限/模型/凭据配置。
