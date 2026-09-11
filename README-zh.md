@@ -50,31 +50,45 @@ Octos 的核心架构是 **可复用的内核 + 可编程的协议边界**。应
 OUP 将命令传入内核，并将响应与事件返回客户端或控制端。
 
 ```mermaid
+%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","fontSize":"15px"},"flowchart":{"curve":"linear","nodeSpacing":24,"rankSpacing":36,"padding":16,"wrappingWidth":240}}}%%
 flowchart TB
-    Native["你的原生应用"]
-    Clients["Octoscode · Octoscode Web<br/>你的 OUP 客户端"]
-    Controllers["Codex · Claude Code<br/>其他 Agent"]
-    Adapter["你的 OUP 控制端适配器"]
-
-    subgraph Octos["Octos Harness 内核"]
-        OUP["OUP dispatcher<br/>WebSocket · stdio · 进程内适配器"]
-        Runtime["Agent 执行<br/>会话与轮次"]
-        Context["上下文 · 记忆<br/>持久化历史与回放"]
-        Execution["工具 · 技能 · 工作流<br/>权限与沙箱"]
-        Agents["子 Agent · Peer<br/>任务监督"]
-        Models["模型提供者<br/>路由与故障转移"]
-
-        OUP <--> Runtime
-        Runtime <--> Context
-        Runtime <--> Execution
-        Runtime <--> Agents
-        Runtime <--> Models
+    subgraph Apps[" "]
+        direction LR
+        Clients["<b>OUP 客户端</b><br/>Octoscode · Octoscode Web"]
+        Controllers["<b>Agent 控制端</b><br/>Codex · Claude Code"]
+        Native["<b>原生宿主</b><br/>你的应用"]
     end
 
-    Native <-->|Rust crates 或任务执行绑定| Runtime
-    Clients <-->|请求、响应与事件| OUP
-    Controllers <--> Adapter
-    Adapter <--> OUP
+    subgraph Kernel[" "]
+        OUP["<b>OUP</b><br/>控制 · 状态 · 事件"]
+        API["<b>库与绑定</b><br/>Rust crates · 任务执行绑定"]
+        Runtime["<b>Octos Harness 内核</b><br/>会话 · 轮次 · 监督"]
+        State["<b>状态</b><br/>上下文 · 记忆<br/>历史 · 回放"]
+        Execution["<b>执行</b><br/>模型 · 工具<br/>技能 · 工作流"]
+        Coordination["<b>协作</b><br/>子 Agent · Peer<br/>任务监督"]
+
+        OUP --> Runtime
+        API --> Runtime
+        Runtime --> State
+        Runtime --> Execution
+        Runtime --> Coordination
+    end
+
+    Clients --> OUP
+    Controllers -.->|你的 OUP 适配器| OUP
+    Native --> API
+
+    classDef app fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
+    classDef interface fill:#eff6ff,stroke:#93c5fd,color:#1e3a8a,stroke-width:1px,rx:8,ry:8
+    classDef core fill:#2563eb,stroke:#2563eb,color:#ffffff,stroke-width:1px,rx:10,ry:10
+    classDef capability fill:#ffffff,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
+    class Clients,Controllers,Native app
+    class OUP,API interface
+    class Runtime core
+    class State,Execution,Coordination capability
+    style Apps fill:transparent,stroke:transparent
+    style Kernel fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:12,ry:12
+    linkStyle default stroke:#94a3b8,stroke-width:1.5px
 ```
 
 ### 原生内核与库
@@ -157,27 +171,29 @@ OUP 客户端或桥接层由这项集成提供。
 完成、失败或中断都会结束当前轮次。
 
 ```mermaid
-flowchart TB
-    Connect["连接并协商能力<br/>config/capabilities/list"]
-    Session["打开有明确作用域的会话<br/>session/open"]
-    Start["分配工作<br/>turn/start"]
-    Run["内核执行轮次<br/>上下文、模型、工具与可选任务委派"]
-    Observe["控制端观察运行时事件"]
-    Next{"接下来发生什么？"}
-    Respond["回应待处理请求<br/>approval/respond 或 user_question/respond"]
-    Intervene["引导或停止当前轮次<br/>turn/steer 或 turn/interrupt"]
-    Collect["收集最终结果<br/>完成、失败或中断"]
+%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","actorBkg":"#eff6ff","actorBorder":"#93c5fd","actorLineColor":"#94a3b8","signalColor":"#64748b","actorTextColor":"#1e3a8a","activationBkgColor":"#dbeafe","activationBorderColor":"#93c5fd","noteBkgColor":"#f8fafc","noteBorderColor":"#cbd5e1","noteTextColor":"#334155","labelBoxBkgColor":"#eff6ff","labelBoxBorderColor":"#93c5fd","labelTextColor":"#1e3a8a"},"sequence":{"mirrorActors":false,"actorMargin":100,"messageMargin":24,"boxMargin":8,"noteMargin":12,"useMaxWidth":true}}}%%
+sequenceDiagram
+    participant C as 应用 / 控制端
+    participant K as Octos 内核
 
-    Connect --> Session --> Start
-    Start -->|已接纳| Run
-    Run --> Observe --> Next
-    Next -->|更多事件| Observe
-    Next -->|审批或提问| Respond
-    Respond --> Run
-    Next -->|控制端介入| Intervene
-    Intervene --> Observe
-    Next -->|终结事件| Collect
-    Collect -.->|下一个任务| Start
+    C->>K: 协商能力 · session/open
+    K-->>C: 确认会话与可用能力
+    C->>K: turn/start
+    K-->>C: 已接纳
+
+    loop 轮次执行中
+        K->>K: 上下文 → 模型 → 工具
+        K-->>C: 消息 · 工具事件 · 进度
+        opt 需要审批或回答
+            K-->>C: 请求决定
+            C->>K: 决定 / 回答
+        end
+        opt 控制端介入
+            C->>K: turn/steer 或 turn/interrupt
+        end
+    end
+
+    K-->>C: 完成 · 失败 · 中断
 ```
 
 例如，打开会话后，控制端可以发送下面的 `turn/start` 请求。将会话占位符替换为

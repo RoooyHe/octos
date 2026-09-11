@@ -60,31 +60,45 @@ OUP to a hosted runtime. OUP carries both commands into the kernel and responses
 and events back to the client or controller.
 
 ```mermaid
+%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","fontSize":"15px"},"flowchart":{"curve":"linear","nodeSpacing":24,"rankSpacing":36,"padding":16,"wrappingWidth":240}}}%%
 flowchart TB
-    Native["Your native application"]
-    Clients["Octoscode · Octoscode Web<br/>Your OUP client"]
-    Controllers["Codex · Claude Code<br/>Other agents"]
-    Adapter["Your OUP controller adapter"]
-
-    subgraph Octos["Octos harness kernel"]
-        OUP["OUP dispatcher<br/>WebSocket · stdio · in-process adapters"]
-        Runtime["Agent execution<br/>Sessions and turns"]
-        Context["Context · memory<br/>Durable history and replay"]
-        Execution["Tools · skills · workflows<br/>Permissions and sandboxing"]
-        Agents["Sub-agents · peers<br/>Task supervision"]
-        Models["Model providers<br/>Routing and failover"]
-
-        OUP <--> Runtime
-        Runtime <--> Context
-        Runtime <--> Execution
-        Runtime <--> Agents
-        Runtime <--> Models
+    subgraph Apps[" "]
+        direction LR
+        Clients["<b>OUP clients</b><br/>Octoscode · Octoscode Web"]
+        Controllers["<b>Agent controllers</b><br/>Codex · Claude Code"]
+        Native["<b>Native hosts</b><br/>Your application"]
     end
 
-    Native <-->|Rust crates or task bindings| Runtime
-    Clients <-->|Requests, responses, events| OUP
-    Controllers <--> Adapter
-    Adapter <--> OUP
+    subgraph Kernel[" "]
+        OUP["<b>OUP</b><br/>Control · state · events"]
+        API["<b>Libraries</b><br/>Rust crates · task bindings"]
+        Runtime["<b>Octos harness kernel</b><br/>Sessions · turns · supervision"]
+        State["<b>State</b><br/>Context · memory<br/>History · replay"]
+        Execution["<b>Execution</b><br/>Models · tools<br/>Skills · workflows"]
+        Coordination["<b>Coordination</b><br/>Sub-agents · peers<br/>Task supervision"]
+
+        OUP --> Runtime
+        API --> Runtime
+        Runtime --> State
+        Runtime --> Execution
+        Runtime --> Coordination
+    end
+
+    Clients --> OUP
+    Controllers -.->|Your OUP adapter| OUP
+    Native --> API
+
+    classDef app fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
+    classDef interface fill:#eff6ff,stroke:#93c5fd,color:#1e3a8a,stroke-width:1px,rx:8,ry:8
+    classDef core fill:#2563eb,stroke:#2563eb,color:#ffffff,stroke-width:1px,rx:10,ry:10
+    classDef capability fill:#ffffff,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
+    class Clients,Controllers,Native app
+    class OUP,API interface
+    class Runtime core
+    class State,Execution,Coordination capability
+    style Apps fill:transparent,stroke:transparent
+    style Kernel fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:12,ry:12
+    linkStyle default stroke:#94a3b8,stroke-width:1.5px
 ```
 
 ### Native kernel and libraries
@@ -181,27 +195,29 @@ questions, and interventions are optional; completion, failure, or interruption
 ends the turn.
 
 ```mermaid
-flowchart TB
-    Connect["Connect and negotiate features<br/>config/capabilities/list"]
-    Session["Open a scoped session<br/>session/open"]
-    Start["Assign work<br/>turn/start"]
-    Run["Kernel executes the turn<br/>Context, models, tools, optional delegation"]
-    Observe["Controller observes runtime events"]
-    Next{"What happens next?"}
-    Respond["Respond to a pending request<br/>approval/respond or user_question/respond"]
-    Intervene["Guide or stop the live turn<br/>turn/steer or turn/interrupt"]
-    Collect["Collect the final outcome<br/>Result, failure, or interruption"]
+%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","actorBkg":"#eff6ff","actorBorder":"#93c5fd","actorLineColor":"#94a3b8","signalColor":"#64748b","actorTextColor":"#1e3a8a","activationBkgColor":"#dbeafe","activationBorderColor":"#93c5fd","noteBkgColor":"#f8fafc","noteBorderColor":"#cbd5e1","noteTextColor":"#334155","labelBoxBkgColor":"#eff6ff","labelBoxBorderColor":"#93c5fd","labelTextColor":"#1e3a8a"},"sequence":{"mirrorActors":false,"actorMargin":100,"messageMargin":24,"boxMargin":8,"noteMargin":12,"useMaxWidth":true}}}%%
+sequenceDiagram
+    participant C as App / controller
+    participant K as Octos kernel
 
-    Connect --> Session --> Start
-    Start -->|Accepted| Run
-    Run --> Observe --> Next
-    Next -->|More events| Observe
-    Next -->|Approval or question| Respond
-    Respond --> Run
-    Next -->|Controller intervention| Intervene
-    Intervene --> Observe
-    Next -->|Terminal event| Collect
-    Collect -.->|Next task| Start
+    C->>K: Negotiate features · session/open
+    K-->>C: Confirmed session + capabilities
+    C->>K: turn/start
+    K-->>C: Accepted
+
+    loop Turn running
+        K->>K: Context → model → tools
+        K-->>C: Messages · tool events · progress
+        opt Approval or question
+            K-->>C: Request a decision
+            C->>K: Decision / answer
+        end
+        opt Controller intervention
+            C->>K: turn/steer or turn/interrupt
+        end
+    end
+
+    K-->>C: Completed · failed · interrupted
 ```
 
 For example, after opening a session, a controller can send this `turn/start`
