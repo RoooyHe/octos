@@ -1,3 +1,16 @@
+<div align="center">
+
+<pre>
+ ██████╗  ██████╗████████╗ ██████╗ ███████╗
+██╔═══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔════╝
+██║   ██║██║        ██║   ██║   ██║███████╗
+██║   ██║██║        ██║   ██║   ██║╚════██║
+╚██████╔╝╚██████╗   ██║   ╚██████╔╝███████║
+ ╚═════╝  ╚═════╝   ╚═╝    ╚═════╝ ╚══════╝
+</pre>
+
+</div>
+
 # Octos
 
 **An embeddable AI agent harness kernel, written in Rust.**
@@ -46,33 +59,7 @@ Embed the Rust crates or task bindings in your application, or connect through
 OUP to a hosted runtime. OUP carries both commands into the kernel and responses
 and events back to the client or controller.
 
-```mermaid
-flowchart TB
-    Native["Your native application"]
-    Clients["Octoscode · Octoscode Web<br/>Your OUP client"]
-    Controllers["Codex · Claude Code<br/>Other agents"]
-    Adapter["Your OUP controller adapter"]
-
-    subgraph Octos["Octos harness kernel"]
-        OUP["OUP dispatcher<br/>WebSocket · stdio · in-process adapters"]
-        Runtime["Agent execution<br/>Sessions and turns"]
-        Context["Context · memory<br/>Durable history and replay"]
-        Execution["Tools · skills · workflows<br/>Permissions and sandboxing"]
-        Agents["Sub-agents · peers<br/>Task supervision"]
-        Models["Model providers<br/>Routing and failover"]
-
-        OUP <--> Runtime
-        Runtime <--> Context
-        Runtime <--> Execution
-        Runtime <--> Agents
-        Runtime <--> Models
-    end
-
-    Native <-->|Rust crates or task bindings| Runtime
-    Clients <-->|Requests, responses, events| OUP
-    Controllers <--> Adapter
-    Adapter <--> OUP
-```
+![Octos harness kernel architecture](docs/assets/readme/architecture.svg)
 
 ### Native kernel and libraries
 
@@ -167,29 +154,7 @@ The controller follows the event stream after a turn is accepted. Approvals,
 questions, and interventions are optional; completion, failure, or interruption
 ends the turn.
 
-```mermaid
-flowchart TB
-    Connect["Connect and negotiate features<br/>config/capabilities/list"]
-    Session["Open a scoped session<br/>session/open"]
-    Start["Assign work<br/>turn/start"]
-    Run["Kernel executes the turn<br/>Context, models, tools, optional delegation"]
-    Observe["Controller observes runtime events"]
-    Next{"What happens next?"}
-    Respond["Respond to a pending request<br/>approval/respond or user_question/respond"]
-    Intervene["Guide or stop the live turn<br/>turn/steer or turn/interrupt"]
-    Collect["Collect the final outcome<br/>Result, failure, or interruption"]
-
-    Connect --> Session --> Start
-    Start -->|Accepted| Run
-    Run --> Observe --> Next
-    Next -->|More events| Observe
-    Next -->|Approval or question| Respond
-    Respond --> Run
-    Next -->|Controller intervention| Intervene
-    Intervene --> Observe
-    Next -->|Terminal event| Collect
-    Collect -.->|Next task| Start
-```
+![OUP controller workflow: connect, assign, supervise, and collect](docs/assets/readme/workflow.svg)
 
 For example, after opening a session, a controller can send this `turn/start`
 request. Replace the session placeholder with the confirmed session ID and use

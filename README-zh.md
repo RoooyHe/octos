@@ -1,3 +1,16 @@
+<div align="center">
+
+<pre>
+ ██████╗  ██████╗████████╗ ██████╗ ███████╗
+██╔═══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔════╝
+██║   ██║██║        ██║   ██║   ██║███████╗
+██║   ██║██║        ██║   ██║   ██║╚════██║
+╚██████╔╝╚██████╗   ██║   ╚██████╔╝███████║
+ ╚═════╝  ╚═════╝   ╚═╝    ╚═════╝ ╚══════╝
+</pre>
+
+</div>
+
 # Octos
 
 **用 Rust 编写、可嵌入应用的 AI Agent Harness 内核。**
@@ -36,33 +49,7 @@ Octos 的核心架构是 **可复用的内核 + 可编程的协议边界**。应
 将 Rust crates 或任务执行绑定嵌入应用，或通过 OUP 连接托管运行时。
 OUP 将命令传入内核，并将响应与事件返回客户端或控制端。
 
-```mermaid
-flowchart TB
-    Native["你的原生应用"]
-    Clients["Octoscode · Octoscode Web<br/>你的 OUP 客户端"]
-    Controllers["Codex · Claude Code<br/>其他 Agent"]
-    Adapter["你的 OUP 控制端适配器"]
-
-    subgraph Octos["Octos Harness 内核"]
-        OUP["OUP dispatcher<br/>WebSocket · stdio · 进程内适配器"]
-        Runtime["Agent 执行<br/>会话与轮次"]
-        Context["上下文 · 记忆<br/>持久化历史与回放"]
-        Execution["工具 · 技能 · 工作流<br/>权限与沙箱"]
-        Agents["子 Agent · Peer<br/>任务监督"]
-        Models["模型提供者<br/>路由与故障转移"]
-
-        OUP <--> Runtime
-        Runtime <--> Context
-        Runtime <--> Execution
-        Runtime <--> Agents
-        Runtime <--> Models
-    end
-
-    Native <-->|Rust crates 或任务执行绑定| Runtime
-    Clients <-->|请求、响应与事件| OUP
-    Controllers <--> Adapter
-    Adapter <--> OUP
-```
+![Octos Harness 内核架构](docs/assets/readme/architecture-zh.svg)
 
 ### 原生内核与库
 
@@ -143,29 +130,7 @@ OUP 客户端或桥接层由这项集成提供。
 轮次被接纳后，控制端通过事件流跟踪执行。审批、提问与控制端介入按需发生；
 完成、失败或中断都会结束当前轮次。
 
-```mermaid
-flowchart TB
-    Connect["连接并协商能力<br/>config/capabilities/list"]
-    Session["打开有明确作用域的会话<br/>session/open"]
-    Start["分配工作<br/>turn/start"]
-    Run["内核执行轮次<br/>上下文、模型、工具与可选任务委派"]
-    Observe["控制端观察运行时事件"]
-    Next{"接下来发生什么？"}
-    Respond["回应待处理请求<br/>approval/respond 或 user_question/respond"]
-    Intervene["引导或停止当前轮次<br/>turn/steer 或 turn/interrupt"]
-    Collect["收集最终结果<br/>完成、失败或中断"]
-
-    Connect --> Session --> Start
-    Start -->|已接纳| Run
-    Run --> Observe --> Next
-    Next -->|更多事件| Observe
-    Next -->|审批或提问| Respond
-    Respond --> Run
-    Next -->|控制端介入| Intervene
-    Intervene --> Observe
-    Next -->|终结事件| Collect
-    Collect -.->|下一个任务| Start
-```
+![OUP 控制流程：连接、分配、监督与收集](docs/assets/readme/workflow-zh.svg)
 
 例如，打开会话后，控制端可以发送下面的 `turn/start` 请求。将会话占位符替换为
 运行时确认的标识，并为每个轮次生成新的 UUID：
