@@ -59,47 +59,7 @@ Embed the Rust crates or task bindings in your application, or connect through
 OUP to a hosted runtime. OUP carries both commands into the kernel and responses
 and events back to the client or controller.
 
-```mermaid
-%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","fontSize":"15px"},"flowchart":{"curve":"linear","nodeSpacing":24,"rankSpacing":36,"padding":16,"wrappingWidth":240}}}%%
-flowchart TB
-    subgraph Apps[" "]
-        direction LR
-        Clients["<b>OUP clients</b><br/>Octoscode · Octoscode Web"]
-        Controllers["<b>Agent controllers</b><br/>Codex · Claude Code"]
-        Native["<b>Native hosts</b><br/>Your application"]
-    end
-
-    subgraph Kernel[" "]
-        OUP["<b>OUP</b><br/>Control · state · events"]
-        API["<b>Libraries</b><br/>Rust crates · task bindings"]
-        Runtime["<b>Octos harness kernel</b><br/>Sessions · turns · supervision"]
-        State["<b>State</b><br/>Context · memory<br/>History · replay"]
-        Execution["<b>Execution</b><br/>Models · tools<br/>Skills · workflows"]
-        Coordination["<b>Coordination</b><br/>Sub-agents · peers<br/>Task supervision"]
-
-        OUP --> Runtime
-        API --> Runtime
-        Runtime --> State
-        Runtime --> Execution
-        Runtime --> Coordination
-    end
-
-    Clients --> OUP
-    Controllers -.->|Your OUP adapter| OUP
-    Native --> API
-
-    classDef app fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
-    classDef interface fill:#eff6ff,stroke:#93c5fd,color:#1e3a8a,stroke-width:1px,rx:8,ry:8
-    classDef core fill:#2563eb,stroke:#2563eb,color:#ffffff,stroke-width:1px,rx:10,ry:10
-    classDef capability fill:#ffffff,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
-    class Clients,Controllers,Native app
-    class OUP,API interface
-    class Runtime core
-    class State,Execution,Coordination capability
-    style Apps fill:transparent,stroke:transparent
-    style Kernel fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:12,ry:12
-    linkStyle default stroke:#94a3b8,stroke-width:1.5px
-```
+![Octos harness kernel architecture](docs/assets/readme/architecture.svg)
 
 ### Native kernel and libraries
 
@@ -194,31 +154,7 @@ The controller follows the event stream after a turn is accepted. Approvals,
 questions, and interventions are optional; completion, failure, or interruption
 ends the turn.
 
-```mermaid
-%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","actorBkg":"#eff6ff","actorBorder":"#93c5fd","actorLineColor":"#94a3b8","signalColor":"#64748b","actorTextColor":"#1e3a8a","activationBkgColor":"#dbeafe","activationBorderColor":"#93c5fd","noteBkgColor":"#f8fafc","noteBorderColor":"#cbd5e1","noteTextColor":"#334155","labelBoxBkgColor":"#eff6ff","labelBoxBorderColor":"#93c5fd","labelTextColor":"#1e3a8a"},"sequence":{"mirrorActors":false,"actorMargin":100,"messageMargin":24,"boxMargin":8,"noteMargin":12,"useMaxWidth":true}}}%%
-sequenceDiagram
-    participant C as App / controller
-    participant K as Octos kernel
-
-    C->>K: Negotiate features · session/open
-    K-->>C: Confirmed session + capabilities
-    C->>K: turn/start
-    K-->>C: Accepted
-
-    loop Turn running
-        K->>K: Context → model → tools
-        K-->>C: Messages · tool events · progress
-        opt Approval or question
-            K-->>C: Request a decision
-            C->>K: Decision / answer
-        end
-        opt Controller intervention
-            C->>K: turn/steer or turn/interrupt
-        end
-    end
-
-    K-->>C: Completed · failed · interrupted
-```
+![OUP controller workflow: connect, assign, supervise, and collect](docs/assets/readme/workflow.svg)
 
 For example, after opening a session, a controller can send this `turn/start`
 request. Replace the session placeholder with the confirmed session ID and use

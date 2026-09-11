@@ -49,47 +49,7 @@ Octos 的核心架构是 **可复用的内核 + 可编程的协议边界**。应
 将 Rust crates 或任务执行绑定嵌入应用，或通过 OUP 连接托管运行时。
 OUP 将命令传入内核，并将响应与事件返回客户端或控制端。
 
-```mermaid
-%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","fontSize":"15px"},"flowchart":{"curve":"linear","nodeSpacing":24,"rankSpacing":36,"padding":16,"wrappingWidth":240}}}%%
-flowchart TB
-    subgraph Apps[" "]
-        direction LR
-        Clients["<b>OUP 客户端</b><br/>Octoscode · Octoscode Web"]
-        Controllers["<b>Agent 控制端</b><br/>Codex · Claude Code"]
-        Native["<b>原生宿主</b><br/>你的应用"]
-    end
-
-    subgraph Kernel[" "]
-        OUP["<b>OUP</b><br/>控制 · 状态 · 事件"]
-        API["<b>库与绑定</b><br/>Rust crates · 任务执行绑定"]
-        Runtime["<b>Octos Harness 内核</b><br/>会话 · 轮次 · 监督"]
-        State["<b>状态</b><br/>上下文 · 记忆<br/>历史 · 回放"]
-        Execution["<b>执行</b><br/>模型 · 工具<br/>技能 · 工作流"]
-        Coordination["<b>协作</b><br/>子 Agent · Peer<br/>任务监督"]
-
-        OUP --> Runtime
-        API --> Runtime
-        Runtime --> State
-        Runtime --> Execution
-        Runtime --> Coordination
-    end
-
-    Clients --> OUP
-    Controllers -.->|你的 OUP 适配器| OUP
-    Native --> API
-
-    classDef app fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
-    classDef interface fill:#eff6ff,stroke:#93c5fd,color:#1e3a8a,stroke-width:1px,rx:8,ry:8
-    classDef core fill:#2563eb,stroke:#2563eb,color:#ffffff,stroke-width:1px,rx:10,ry:10
-    classDef capability fill:#ffffff,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:8,ry:8
-    class Clients,Controllers,Native app
-    class OUP,API interface
-    class Runtime core
-    class State,Execution,Coordination capability
-    style Apps fill:transparent,stroke:transparent
-    style Kernel fill:#f8fafc,stroke:#cbd5e1,color:#334155,stroke-width:1px,rx:12,ry:12
-    linkStyle default stroke:#94a3b8,stroke-width:1.5px
-```
+![Octos Harness 内核架构](docs/assets/readme/architecture-zh.svg)
 
 ### 原生内核与库
 
@@ -170,31 +130,7 @@ OUP 客户端或桥接层由这项集成提供。
 轮次被接纳后，控制端通过事件流跟踪执行。审批、提问与控制端介入按需发生；
 完成、失败或中断都会结束当前轮次。
 
-```mermaid
-%%{init: {"themeVariables":{"fontFamily":"system-ui, sans-serif","actorBkg":"#eff6ff","actorBorder":"#93c5fd","actorLineColor":"#94a3b8","signalColor":"#64748b","actorTextColor":"#1e3a8a","activationBkgColor":"#dbeafe","activationBorderColor":"#93c5fd","noteBkgColor":"#f8fafc","noteBorderColor":"#cbd5e1","noteTextColor":"#334155","labelBoxBkgColor":"#eff6ff","labelBoxBorderColor":"#93c5fd","labelTextColor":"#1e3a8a"},"sequence":{"mirrorActors":false,"actorMargin":100,"messageMargin":24,"boxMargin":8,"noteMargin":12,"useMaxWidth":true}}}%%
-sequenceDiagram
-    participant C as 应用 / 控制端
-    participant K as Octos 内核
-
-    C->>K: 协商能力 · session/open
-    K-->>C: 确认会话与可用能力
-    C->>K: turn/start
-    K-->>C: 已接纳
-
-    loop 轮次执行中
-        K->>K: 上下文 → 模型 → 工具
-        K-->>C: 消息 · 工具事件 · 进度
-        opt 需要审批或回答
-            K-->>C: 请求决定
-            C->>K: 决定 / 回答
-        end
-        opt 控制端介入
-            C->>K: turn/steer 或 turn/interrupt
-        end
-    end
-
-    K-->>C: 完成 · 失败 · 中断
-```
+![OUP 控制流程：连接、分配、监督与收集](docs/assets/readme/workflow-zh.svg)
 
 例如，打开会话后，控制端可以发送下面的 `turn/start` 请求。将会话占位符替换为
 运行时确认的标识，并为每个轮次生成新的 UUID：
